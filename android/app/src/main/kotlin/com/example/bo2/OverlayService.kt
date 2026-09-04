@@ -57,6 +57,7 @@ class OverlayService : Service() {
         private const val MASK_BOTTOM = 0.30f
         private val AMOUNT_REGEX = Regex("""\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?""")
         private val KM_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*km""")
+        private val METERS_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*m\b""")
         private val MIN_VALUE_REGEX = Regex("""(?i)([0-9]{1,3})\s*min""")
         private const val RATE_NORMAL_MIN = 1100.0
         private const val RATE_NORMAL_MAX = 1300.0
@@ -70,8 +71,6 @@ class OverlayService : Service() {
     private var overlayView: LinearLayout? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var overlayVisible = false
-    private var verdictValue: TextView? = null
-    private var verdictBox: LinearLayout? = null
     private var proxValue: TextView? = null
     private var proxBox: LinearLayout? = null
     private var priceValue: TextView? = null
@@ -202,27 +201,24 @@ class OverlayService : Service() {
             return LinearLayoutDetail(b, tv)
         }
 
-        // Fila superior: Distancia (proximidad) | Evaluación (veredicto)
+        // Fila superior: Distancia (proximidad) | COP/km
         val proxD = box("Distancia")
         proxBox = proxD.t1
         proxValue = proxD.t2
-        val verdictD = box("Evaluación")
-        verdictBox = verdictD.t1
-        verdictValue = verdictD.t2
+        val rateD = box("COP/km")
+        rateValue = rateD.t2
+        rateBox = rateD.t1
         val topRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
             setPadding(0, 8, 0, 0)
         }
         topRow.addView(proxD.t1, boxLp)
-        topRow.addView(verdictD.t1, boxLp)
+        topRow.addView(rateD.t1, boxLp)
 
-        // Fila inferior: Precio | COP/km | COP/min | Paradas (condicional)
+        // Fila inferior: Precio | COP/min | Paradas (condicional)
         val priceD = box("Precio")
         priceValue = priceD.t2
-        val rateD = box("COP/km")
-        rateValue = rateD.t2
-        rateBox = rateD.t1
         val timeD = box("COP/min")
         timeValue = timeD.t2
         timeBox = timeD.t1
@@ -237,7 +233,6 @@ class OverlayService : Service() {
             setPadding(0, 6, 0, 0)
         }
         bottomRow.addView(priceD.t1, boxLp)
-        bottomRow.addView(rateD.t1, boxLp)
         bottomRow.addView(timeD.t1, boxLp)
         bottomRow.addView(stopsD.t1, boxLp)
 
@@ -411,26 +406,30 @@ class OverlayService : Service() {
     private fun ocrNumber(s: String): String =
         s.replace('l', '1').replace('I', '1').replace('O', '0').replace('o', '0')
 
-    // Suma km y minutos de las dos líneas inferiores (con "min" y "km"), o null si no son 2.
+    // Suma km y minutos de las dos líneas de viaje (cada una con "min"), o null si no son 2.
     private fun extractTrip(result: com.google.mlkit.vision.text.Text): Trip? {
-        val kmCandidates = result.textBlocks.flatMap { b -> b.lines.map { it.text } }
-            .filter { it.lowercase().contains("km") }
-        if (kmCandidates.isNotEmpty()) {
-            Log.d(TAG, "kmCandidates: ${kmCandidates.joinToString(" | ")}")
-        }
         val found = mutableListOf<Triple<Int, Double, Double>>() // y, km, min
         for (block in result.textBlocks) {
             for (line in block.lines) {
-                val low = line.text.lowercase()
-                if (!low.contains("min") || !low.contains("km")) continue
-                val kmM = KM_VALUE_REGEX.find(line.text) ?: continue
-                val minM = MIN_VALUE_REGEX.find(line.text) ?: continue
-                val km = ocrNumber(kmM.groupValues[1]).replace(",", ".").toDoubleOrNull() ?: continue
+                val text = line.text
+                if (!text.lowercase().contains("min")) continue
+                val minM = MIN_VALUE_REGEX.find(text) ?: continue
                 val minutes = ocrNumber(minM.groupValues[1]).toDoubleOrNull() ?: continue
+                // Distancia: prefiere "km"; si no, metros ("m") -> convertir a km (/1000).
+                val kmM = KM_VALUE_REGEX.find(text)
+                val km = if (kmM != null) {
+                    ocrNumber(kmM.groupValues[1]).replace(",", ".").toDoubleOrNull()
+                } else {
+                    val mM = METERS_VALUE_REGEX.find(text)
+                    if (mM != null)
+                        (ocrNumber(mM.groupValues[1]).replace(",", ".").toDoubleOrNull() ?: 0.0) / 1000.0
+                    else null
+                } ?: continue
+                Log.d(TAG, "tripLine: '${text}' -> ${km} km, ${minutes} min")
                 found.add(Triple(line.boundingBox?.top ?: 0, km, minutes))
             }
         }
-        if (found.size != 2) return null  // solo la pantalla de una tarifa (exactamente 2 km/tiempos)
+        if (found.size != 2) return null  // solo la pantalla de una tarifa (exactamente 2 líneas tiempo/distancia)
         found.sortByDescending { it.first }  // las dos más bajas en pantalla
         val k1 = found[0].second
         val k2 = found[1].second
@@ -463,9 +462,6 @@ class OverlayService : Service() {
 
     // Número de paradas/destinos SOLO si hay un número junto a "parada" o "destino".
     private fun extractStops(result: com.google.mlkit.vision.text.Text): Pair<Int, String>? {
-        val debug = result.textBlocks.flatMap { b -> b.lines.map { it.text } }
-            .filter { it.lowercase().contains("dest") || it.lowercase().contains("parad") }
-        if (debug.isNotEmpty()) Log.d(TAG, "STOPS hint: ${debug.joinToString(" | ")}")
         val numRe = Regex("""\d{1,2}""")
         for (block in result.textBlocks) {
             for (line in block.lines) {
@@ -644,8 +640,6 @@ class OverlayService : Service() {
             if (pendingFrames >= SHOW_AFTER_FRAMES) {
                 setOverlayVisible(true)
                 priceValue?.text = amountStr
-                verdictValue?.text = ""
-                verdictBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
                 proxValue?.text = ""
                 proxBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
                 rateValue?.text = ""
@@ -664,14 +658,6 @@ class OverlayService : Service() {
         if (pendingFrames >= SHOW_AFTER_FRAMES) {
             setOverlayVisible(true)
             priceValue?.text = amountStr
-            // Evaluación (veredicto)
-            verdictValue?.text = verdict
-            verdictBox?.let { b ->
-                b.setBackgroundColor(verdictColor(verdict))
-                for (i in 0 until b.childCount) {
-                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
-                }
-            }
             // Distancia (proximidad por el primer km)
             val prox = classifyProximity(firstKm ?: Double.MAX_VALUE)
             proxValue?.text = prox
