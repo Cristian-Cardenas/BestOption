@@ -44,16 +44,22 @@ class MainActivity : FlutterActivity() {
                     result.success(
                         mapOf(
                             "rateMin" to prefs.getFloat("rate_min", 1100f),
-                            "rateMax" to prefs.getFloat("rate_max", 1300f)
+                            "rateMax" to prefs.getFloat("rate_max", 1300f),
+                            "timeMin" to prefs.getFloat("time_min", 450f),
+                            "timeMax" to prefs.getFloat("time_max", 650f)
                         )
                     )
                 }
                 "saveConfig" -> {
                     val min = (call.argument<Double>("rateMin") ?: 1100.0).toFloat()
                     val max = (call.argument<Double>("rateMax") ?: 1300.0).toFloat()
+                    val tmin = (call.argument<Double>("timeMin") ?: 450.0).toFloat()
+                    val tmax = (call.argument<Double>("timeMax") ?: 650.0).toFloat()
                     getSharedPreferences("bo2_config", MODE_PRIVATE).edit()
                         .putFloat("rate_min", min)
                         .putFloat("rate_max", max)
+                        .putFloat("time_min", tmin)
+                        .putFloat("time_max", tmax)
                         .apply()
                     result.success(null)
                 }
@@ -61,6 +67,8 @@ class MainActivity : FlutterActivity() {
                     getSharedPreferences("bo2_config", MODE_PRIVATE).edit()
                         .putFloat("rate_min", 1100f)
                         .putFloat("rate_max", 1300f)
+                        .putFloat("time_min", 450f)
+                        .putFloat("time_max", 650f)
                         .apply()
                     result.success(null)
                 }

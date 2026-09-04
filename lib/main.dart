@@ -8,17 +8,17 @@ class OverlayApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => MaterialApp(
-        title: 'BO2 Overlay',
-        theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo), useMaterial3: true),
-        home: const OverlayHomePage(),
-      );
-}
+          title: 'BestOption',
+          theme: ThemeData(colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo), useMaterial3: true),
+          home: const OverlayHomePage(),
+        );
+  }
 
-class OverlayHomePage extends StatefulWidget {
-  const OverlayHomePage({super.key});
-  @override
-  State<OverlayHomePage> createState() => _OverlayHomePageState();
-}
+  class OverlayHomePage extends StatefulWidget {
+    const OverlayHomePage({super.key});
+    @override
+    State<OverlayHomePage> createState() => _OverlayHomePageState();
+  }
 
 class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingObserver {
   static const _channel = MethodChannel('com.example.bo2/overlay');
@@ -26,8 +26,10 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
   bool _running = false;
 
   final _minCtrl = TextEditingController(text: '1100');
-  final _maxCtrl = TextEditingController(text: '1300');
-  bool _saved = false;
+    final _maxCtrl = TextEditingController(text: '1300');
+    final _timeMinCtrl = TextEditingController(text: '450');
+    final _timeMaxCtrl = TextEditingController(text: '650');
+    bool _saved = false;
 
   @override
   void initState() {
@@ -41,8 +43,10 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _minCtrl.dispose();
-    _maxCtrl.dispose();
-    super.dispose();
+        _maxCtrl.dispose();
+        _timeMinCtrl.dispose();
+        _timeMaxCtrl.dispose();
+        super.dispose();
   }
 
   @override
@@ -72,7 +76,9 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
       final cfg = await _channel.invokeMethod<Map>('getConfig');
       if (cfg != null) {
         _minCtrl.text = _formatRate((cfg['rateMin'] as num).toDouble());
-        _maxCtrl.text = _formatRate((cfg['rateMax'] as num).toDouble());
+                _maxCtrl.text = _formatRate((cfg['rateMax'] as num).toDouble());
+                _timeMinCtrl.text = _formatRate((cfg['timeMin'] as num).toDouble());
+                _timeMaxCtrl.text = _formatRate((cfg['timeMax'] as num).toDouble());
         if (mounted) setState(() => _saved = true);
       }
     } on MissingPluginException {
@@ -81,25 +87,33 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
   }
 
   Future<void> _saveConfig() async {
-    final min = _parseRate(_minCtrl.text);
-    final max = _parseRate(_maxCtrl.text);
-    await _channel.invokeMethod('saveConfig', {'rateMin': min, 'rateMax': max});
-    if (mounted) {
-      setState(() {
-        _minCtrl.text = _formatRate(min);
-        _maxCtrl.text = _formatRate(max);
-        _saved = true;
+      final min = _parseRate(_minCtrl.text);
+      final max = _parseRate(_maxCtrl.text);
+      final tmin = _parseRate(_timeMinCtrl.text);
+      final tmax = _parseRate(_timeMaxCtrl.text);
+      await _channel.invokeMethod('saveConfig', {
+        'rateMin': min,
+        'rateMax': max,
+        'timeMin': tmin,
+        'timeMax': tmax,
       });
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('Configuración guardada (min $min, max $max)')));
+      if (mounted) {
+        setState(() {
+          _minCtrl.text = _formatRate(min);
+          _maxCtrl.text = _formatRate(max);
+          _timeMinCtrl.text = _formatRate(tmin);
+          _timeMaxCtrl.text = _formatRate(tmax);
+          _saved = true;
+        });
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Configuración guardada')));
+      }
     }
-  }
 
   Future<void> _resetConfig() async {
     await _channel.invokeMethod('resetConfig');
     await _loadConfig();
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Valores restaurados (1100 - 1300)')));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Valores restaurados')));
     }
   }
 
@@ -119,7 +133,7 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
 
   @override
   Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('BO2 Overlay')),
+        appBar: AppBar(title: const Text('BestOption')),
         body: Center(
           child: SingleChildScrollView(
             padding: const EdgeInsets.all(24),
@@ -141,8 +155,8 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
               // ------- Ajustes -------
               Text('Ajustes', style: Theme.of(context).textTheme.titleMedium),
               const SizedBox(height: 8),
-              Text('Tarifa por km: menor al mínimo = MALO · entre = NORMAL · mayor al máximo = BUENO',
-                  style: Theme.of(context).textTheme.bodySmall),
+              Text('Tarifa por km: menor al mínimo = MALO · entre = REGULAR · mayor al máximo = BUENO\nTarifa por min: igual criterio con sus umbrales',
+                                style: Theme.of(context).textTheme.bodySmall),
               const SizedBox(height: 16),
               TextField(
                 controller: _minCtrl,
@@ -151,11 +165,23 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
               ),
               const SizedBox(height: 12),
               TextField(
-                controller: _maxCtrl,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(labelText: 'Máximo normal (COP/km)', border: OutlineInputBorder()),
-              ),
-              const SizedBox(height: 16),
+                              controller: _maxCtrl,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(labelText: 'Máximo normal (COP/km)', border: OutlineInputBorder()),
+                            ),
+                            const SizedBox(height: 16),
+                            TextField(
+                              controller: _timeMinCtrl,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(labelText: 'Mínimo normal (COP/min)', border: OutlineInputBorder()),
+                            ),
+                            const SizedBox(height: 12),
+                            TextField(
+                              controller: _timeMaxCtrl,
+                              keyboardType: TextInputType.number,
+                              decoration: const InputDecoration(labelText: 'Máximo normal (COP/min)', border: OutlineInputBorder()),
+                            ),
+                            const SizedBox(height: 16),
               Row(children: [
                 Expanded(
                   child: FilledButton.tonal(onPressed: _resetConfig, child: const Text('Restaurar')),

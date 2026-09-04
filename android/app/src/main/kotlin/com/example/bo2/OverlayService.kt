@@ -13,7 +13,9 @@ import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.AudioManager
 import android.media.ImageReader
+import android.media.ToneGenerator
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
@@ -49,14 +51,17 @@ class OverlayService : Service() {
         private const val FORCE_OCR_EVERY = 4        // aunque no cambie, reparar OCR cada N ticks
         private const val SHOW_AFTER_FRAMES = 1      // frames seguidos para confirmar el valor
         private const val HIDE_AFTER_FRAMES = 1      // evaluaciones sin precio para ocultar el overlay
-        private const val MASK_LEFT = 0.20f           // región del overlay (para no leerlo a sí mismo)
-        private const val MASK_RIGHT = 0.80f
+        private const val MASK_LEFT = 0.0f            // cubrir TODO el ancho del overlay (para no leerse a sí mismo)
+        private const val MASK_RIGHT = 1.0f
         private const val MASK_TOP = 0.06f
-        private const val MASK_BOTTOM = 0.22f
+        private const val MASK_BOTTOM = 0.30f
         private val AMOUNT_REGEX = Regex("""\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?""")
         private val KM_VALUE_REGEX = Regex("""(?i)([0-9]+(?:[.,][0-9]+)?)\s*km""")
+        private val MIN_VALUE_REGEX = Regex("""(?i)([0-9]{1,3})\s*min""")
         private const val RATE_NORMAL_MIN = 1100.0
         private const val RATE_NORMAL_MAX = 1300.0
+        private const val TIME_NORMAL_MIN = 450.0
+        private const val TIME_NORMAL_MAX = 650.0
     }
 
     private lateinit var windowManager: WindowManager
@@ -64,7 +69,13 @@ class OverlayService : Service() {
     private var overlayParams: WindowManager.LayoutParams? = null
     private var overlayVisible = false
     private var priceTextView: TextView? = null
-    private var rateTextView: TextView? = null
+    private var priceValue: TextView? = null
+    private var rateValue: TextView? = null
+    private var rateBox: LinearLayout? = null
+    private var timeValue: TextView? = null
+    private var timeBox: LinearLayout? = null
+    private var stopsValue: TextView? = null
+    private var stopsBox: LinearLayout? = null
     private var missFrames = 0
     private val channelId = "overlay_service"
     private val notificationId = 1001
@@ -147,9 +158,11 @@ class OverlayService : Service() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(36, 18, 36, 18)
-            setBackgroundColor(Color.argb(225, 18, 30, 58))
+            setPadding(24, 16, 24, 16)
+            setBackgroundColor(Color.argb(150, 15, 24, 48)) // fondo semi-transparente
         }
+
+        // Calificador (BUENO/REGULAR/MALO) — se queda como está, grande y arriba.
         priceTextView = TextView(this).apply {
             text = ""
             setTextColor(Color.WHITE)
@@ -157,14 +170,68 @@ class OverlayService : Service() {
             gravity = Gravity.CENTER
             setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
         }
-        rateTextView = TextView(this).apply {
-            text = ""
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            gravity = Gravity.CENTER
-        }
         root.addView(priceTextView)
-        root.addView(rateTextView)
+
+        // Cuadros con título: Precio / COP/km / Paradas (compactos, centrados, 1 línea)
+        val minBoxW = (100f * resources.displayMetrics.density).toInt()
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 8, 0, 0)
+        }
+        fun box(title: String): LinearLayoutDetail {
+            val b = LinearLayout(this@OverlayService).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(16, 10, 16, 10)
+                setMinimumWidth(minBoxW)
+                setBackgroundColor(Color.argb(200, 0, 0, 0))
+            }
+            val tl = TextView(this@OverlayService).apply {
+                text = title
+                textSize = 11f
+                setTextColor(Color.rgb(170, 185, 230))
+                gravity = Gravity.CENTER
+            }
+            b.addView(tl)
+            val tv = TextView(this@OverlayService).apply {
+                text = ""
+                textSize = 18f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+                setSingleLine(true)
+                setMaxLines(1)
+            }
+            b.addView(tv)
+            return LinearLayoutDetail(b, tv)
+        }
+
+        val priceDetail = box("Precio")
+        val rateDetail = box("COP/km")
+        val timeDetail = box("COP/min")
+        val stopsDetail = box("Paradas")
+        priceValue = priceDetail.t2
+        rateValue = rateDetail.t2
+        rateBox = rateDetail.t1
+        timeValue = timeDetail.t2
+        timeBox = timeDetail.t1
+        stopsValue = stopsDetail.t2
+        stopsValue?.setTextColor(Color.rgb(255, 80, 80))
+        stopsBox = stopsDetail.t1
+        stopsBox?.visibility = android.view.View.GONE
+
+        val boxLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            marginEnd = 6
+            marginStart = 6
+        }
+        row.addView(priceDetail.t1, boxLp)
+        row.addView(rateDetail.t1, boxLp)
+        row.addView(timeDetail.t1, boxLp)
+        row.addView(stopsDetail.t1, boxLp)
+        root.addView(row)
         overlayView = root
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -178,8 +245,10 @@ class OverlayService : Service() {
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.CENTER or Gravity.TOP; y = 160 }
+        ).apply { gravity = Gravity.CENTER or Gravity.TOP; y = 140 }
     }
+
+    private data class LinearLayoutDetail(val t1: LinearLayout, val t2: TextView)
 
     private fun setOverlayVisible(visible: Boolean) {
         if (visible == overlayVisible) return
@@ -327,26 +396,28 @@ class OverlayService : Service() {
         return t.toDoubleOrNull()
     }
 
-    // Suma los dos valores de km de la parte inferior (líneas con "min" y "km").
-    private fun extractKmSum(result: com.google.mlkit.vision.text.Text): Double? {
+    // Suma km y minutos de las dos líneas inferiores (con "min" y "km"), o null si no son 2.
+    private fun extractTrip(result: com.google.mlkit.vision.text.Text): Pair<Double, Double>? {
         val kmCandidates = result.textBlocks.flatMap { b -> b.lines.map { it.text } }
             .filter { it.lowercase().contains("km") }
         if (kmCandidates.isNotEmpty()) {
             Log.d(TAG, "kmCandidates: ${kmCandidates.joinToString(" | ")}")
         }
-        val found = mutableListOf<Pair<Int, Double>>()
+        val found = mutableListOf<Triple<Int, Double, Double>>() // y, km, min
         for (block in result.textBlocks) {
             for (line in block.lines) {
                 val low = line.text.lowercase()
                 if (!low.contains("min") || !low.contains("km")) continue
-                val m = KM_VALUE_REGEX.find(line.text) ?: continue
-                val km = m.groupValues[1].replace(",", ".").toDoubleOrNull() ?: continue
-                found.add(Pair(line.boundingBox?.top ?: 0, km))
+                val kmM = KM_VALUE_REGEX.find(line.text) ?: continue
+                val minM = MIN_VALUE_REGEX.find(line.text) ?: continue
+                val km = kmM.groupValues[1].replace(",", ".").toDoubleOrNull() ?: continue
+                val minutes = minM.groupValues[1].toDoubleOrNull() ?: continue
+                found.add(Triple(line.boundingBox?.top ?: 0, km, minutes))
             }
         }
-        if (found.size != 2) return null  // solo la pantalla de una tarifa (exactamente 2 km)
+        if (found.size != 2) return null  // solo la pantalla de una tarifa (exactamente 2 km/tiempos)
         found.sortByDescending { it.first }  // las dos más bajas en pantalla
-        return found[0].second + found[1].second
+        return Pair(found[0].second + found[1].second, found[0].third + found[1].third)
     }
 
     private fun classify(rate: Double): String {
@@ -355,8 +426,23 @@ class OverlayService : Service() {
         return when {
             rate > hi -> "BUENO"
             rate < lo -> "MALO"
-            else -> "NORMAL"
+            else -> "REGULAR"
         }
+    }
+
+    // Número de paradas SOLO si hay un número junto a "parada" (ignora encabezados "Paradas" sin cifra).
+    private fun extractStops(result: com.google.mlkit.vision.text.Text): Int? {
+        val numRe = Regex("""\d{1,2}""")
+        for (block in result.textBlocks) {
+            for (line in block.lines) {
+                if (!line.text.lowercase().contains("parada")) continue
+                val m = numRe.find(line.text) ?: continue // "Paradas" sin número -> no es un conteo
+                Log.d(TAG, "STOPS: '${line.text}' -> ${m.value}")
+                return m.value.toInt().coerceAtLeast(1)
+            }
+        }
+        Log.d(TAG, "STOPS: sin paradas numeradas")
+        return null
     }
 
     private fun defaultPrefs(): SharedPreferences = getSharedPreferences("bo2_config", 0)
@@ -365,10 +451,33 @@ class OverlayService : Service() {
 
     private fun normalMax(): Double = defaultPrefs().getFloat("rate_max", RATE_NORMAL_MAX.toFloat()).toDouble()
 
+    private fun classifyTime(rate: Double): String {
+        val lo = timeMin()
+        val hi = timeMax()
+        return when {
+            rate > hi -> "BUENO"
+            rate < lo -> "MALO"
+            else -> "REGULAR"
+        }
+    }
+
+    private fun timeMin(): Double = defaultPrefs().getFloat("time_min", TIME_NORMAL_MIN.toFloat()).toDouble()
+
+    private fun timeMax(): Double = defaultPrefs().getFloat("time_max", TIME_NORMAL_MAX.toFloat()).toDouble()
+
     private fun verdictColor(verdict: String): Int = when (verdict) {
         "BUENO" -> Color.rgb(76, 217, 100)
-        "NORMAL" -> Color.rgb(255, 195, 0)
+        "REGULAR" -> Color.rgb(255, 195, 0)
         else -> Color.rgb(255, 69, 58)
+    }
+
+    // Alerta (solo pitido) cuando una tarifa es BUENO.
+    private fun alertGood() {
+        try {
+            val tone = ToneGenerator(AudioManager.STREAM_NOTIFICATION, 80)
+            tone.startTone(ToneGenerator.TONE_PROP_BEEP2)
+            mainHandler.postDelayed({ try { tone.release() } catch (_: Exception) {} }, 250)
+        } catch (_: Exception) {}
     }
 
     private fun frameChanged(thumb: Bitmap): Boolean {
@@ -447,16 +556,19 @@ class OverlayService : Service() {
 
         val amountStr = bestLine?.text?.let { extractAmount(it) }
         val price = amountStr?.let { parseAmount(it) }
-        val kmSum = extractKmSum(result)
+        val trip = extractTrip(result)
+        val kmSum = trip?.first
+        val minSum = trip?.second
+        val stops = extractStops(result)
 
         val now = System.currentTimeMillis()
         if (now - lastLog > 2000) {
             lastLog = now
-            Log.i(TAG, "lines=$totalLines amt='$amountStr' price=$price kmSum=$kmSum overlay=$overlayVisible")
+            Log.i(TAG, "lines=$totalLines amt='$amountStr' price=$price km=$kmSum min=$minSum stops=$stops overlay=$overlayVisible")
         }
 
-        if (price == null || kmSum == null || amountStr == null) {
-            // Sin precio o sin los dos km: contar frames para ocultar el overlay.
+        if (price == null || amountStr == null) {
+            // Sin precio: contar frames para ocultar el overlay.
             missFrames++
             pendingFrames = 0
             pendingPrice = null
@@ -467,10 +579,16 @@ class OverlayService : Service() {
             return
         }
 
-        val rate = price / kmSum
-        val verdict = classify(rate)
-
         missFrames = 0
+        // Las paradas se refrescan SIEMPRE que haya precio (aunque falten km/min).
+        val hasStops = stops != null
+        stopsBox?.visibility = if (hasStops) android.view.View.VISIBLE else android.view.View.GONE
+        stopsValue?.text = if (hasStops) {
+            "${stops} parada${if (stops!! > 1) "s" else ""}"
+        } else {
+            ""
+        }
+
         // Estabilidad: se muestra solo si aparece el mismo precio N frames seguidos.
         if (pendingPrice == amountStr) {
             pendingFrames++
@@ -478,14 +596,51 @@ class OverlayService : Service() {
             pendingPrice = amountStr
             pendingFrames = 1
         }
+
+        if (kmSum == null || minSum == null) {
+            // Precio visible pero sin datos de viaje: mostrar precio + paradas, tasas en blanco.
+            if (pendingFrames >= SHOW_AFTER_FRAMES) {
+                setOverlayVisible(true)
+                priceValue?.text = amountStr
+                rateValue?.text = ""
+                rateBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
+                timeValue?.text = ""
+                timeBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
+            }
+            return
+        }
+
+        val rate = price / kmSum
+        val verdict = classify(rate)
+        val rateMin = price / minSum
+        val timeVerdict = classifyTime(rateMin)
+
         if (pendingFrames >= SHOW_AFTER_FRAMES) {
             setOverlayVisible(true)
+            priceValue?.text = amountStr
+            rateValue?.text = "${"%.0f".format(rate)}"
+            rateBox?.let { b ->
+                b.setBackgroundColor(verdictColor(verdict))
+                for (i in 0 until b.childCount) {
+                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
+                }
+            }
+            timeValue?.text = "${"%.0f".format(rateMin)}"
+            timeBox?.let { b ->
+                b.setBackgroundColor(verdictColor(timeVerdict))
+                for (i in 0 until b.childCount) {
+                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
+                }
+            }
             if (shownPrice != amountStr) {
                 shownPrice = amountStr
                 priceTextView?.text = verdict
                 priceTextView?.setTextColor(verdictColor(verdict))
-                rateTextView?.text = "${"%.0f".format(rate)} COP/km · $amountStr"
-                Log.i(TAG, "RESULT price=$price kmSum=${"%.1f".format(kmSum)} rate=${"%.0f".format(rate)} -> $verdict")
+                Log.i(
+                    TAG,
+                    "RESULT price=$price km=$kmSum min=$minSum rate=${"%.0f".format(rate)}($verdict) rateMin=${"%.0f".format(rateMin)}($timeVerdict) stops=$stops"
+                )
+                if (verdict == "BUENO") alertGood()
             }
         }
     }
