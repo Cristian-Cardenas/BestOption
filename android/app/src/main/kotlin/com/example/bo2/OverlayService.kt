@@ -62,13 +62,18 @@ class OverlayService : Service() {
         private const val RATE_NORMAL_MAX = 1300.0
         private const val TIME_NORMAL_MIN = 450.0
         private const val TIME_NORMAL_MAX = 650.0
+        private const val PROX_NEAR = 1.6   // primer km: < 1.6 = Cerca
+        private const val PROX_FAR = 2.0    // primer km: > 2.0 = Lejos
     }
 
     private lateinit var windowManager: WindowManager
     private var overlayView: LinearLayout? = null
     private var overlayParams: WindowManager.LayoutParams? = null
     private var overlayVisible = false
-    private var priceTextView: TextView? = null
+    private var verdictValue: TextView? = null
+    private var verdictBox: LinearLayout? = null
+    private var proxValue: TextView? = null
+    private var proxBox: LinearLayout? = null
     private var priceValue: TextView? = null
     private var rateValue: TextView? = null
     private var rateBox: LinearLayout? = null
@@ -158,31 +163,22 @@ class OverlayService : Service() {
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(24, 16, 24, 16)
+            setPadding(20, 12, 20, 12)
             setBackgroundColor(Color.argb(150, 15, 24, 48)) // fondo semi-transparente
         }
-
-        // Calificador (BUENO/REGULAR/MALO) — se queda como está, grande y arriba.
-        priceTextView = TextView(this).apply {
-            text = ""
-            setTextColor(Color.WHITE)
-            textSize = 40f
-            gravity = Gravity.CENTER
-            setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+        val minBoxW = (96f * resources.displayMetrics.density).toInt()
+        val boxLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            marginStart = 5
+            marginEnd = 5
         }
-        root.addView(priceTextView)
 
-        // Cuadros con título: Precio / COP/km / Paradas (compactos, centrados, 1 línea)
-        val minBoxW = (100f * resources.displayMetrics.density).toInt()
-        val row = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_HORIZONTAL
-            setPadding(0, 8, 0, 0)
-        }
         fun box(title: String): LinearLayoutDetail {
             val b = LinearLayout(this@OverlayService).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(16, 10, 16, 10)
+                setPadding(14, 9, 14, 9)
                 setMinimumWidth(minBoxW)
                 setBackgroundColor(Color.argb(200, 0, 0, 0))
             }
@@ -195,7 +191,7 @@ class OverlayService : Service() {
             b.addView(tl)
             val tv = TextView(this@OverlayService).apply {
                 text = ""
-                textSize = 18f
+                textSize = 17f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.CENTER
                 setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
@@ -206,32 +202,47 @@ class OverlayService : Service() {
             return LinearLayoutDetail(b, tv)
         }
 
-        val priceDetail = box("Precio")
-        val rateDetail = box("COP/km")
-        val timeDetail = box("COP/min")
-        val stopsDetail = box("Paradas")
-        priceValue = priceDetail.t2
-        rateValue = rateDetail.t2
-        rateBox = rateDetail.t1
-        timeValue = timeDetail.t2
-        timeBox = timeDetail.t1
-        stopsValue = stopsDetail.t2
-        stopsValue?.setTextColor(Color.rgb(255, 80, 80))
-        stopsBox = stopsDetail.t1
-        stopsBox?.visibility = android.view.View.GONE
-
-        val boxLp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            marginEnd = 6
-            marginStart = 6
+        // Fila superior: Distancia (proximidad) | Evaluación (veredicto)
+        val proxD = box("Distancia")
+        proxBox = proxD.t1
+        proxValue = proxD.t2
+        val verdictD = box("Evaluación")
+        verdictBox = verdictD.t1
+        verdictValue = verdictD.t2
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 0)
         }
-        row.addView(priceDetail.t1, boxLp)
-        row.addView(rateDetail.t1, boxLp)
-        row.addView(timeDetail.t1, boxLp)
-        row.addView(stopsDetail.t1, boxLp)
-        root.addView(row)
+        topRow.addView(proxD.t1, boxLp)
+        topRow.addView(verdictD.t1, boxLp)
+
+        // Fila inferior: Precio | COP/km | COP/min | Paradas (condicional)
+        val priceD = box("Precio")
+        priceValue = priceD.t2
+        val rateD = box("COP/km")
+        rateValue = rateD.t2
+        rateBox = rateD.t1
+        val timeD = box("COP/min")
+        timeValue = timeD.t2
+        timeBox = timeD.t1
+        val stopsD = box("Paradas")
+        stopsValue = stopsD.t2
+        stopsValue?.setTextColor(Color.rgb(255, 80, 80))
+        stopsBox = stopsD.t1
+        stopsBox?.visibility = android.view.View.GONE
+        val bottomRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 6, 0, 0)
+        }
+        bottomRow.addView(priceD.t1, boxLp)
+        bottomRow.addView(rateD.t1, boxLp)
+        bottomRow.addView(timeD.t1, boxLp)
+        bottomRow.addView(stopsD.t1, boxLp)
+
+        root.addView(topRow)
+        root.addView(bottomRow)
         overlayView = root
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -245,7 +256,7 @@ class OverlayService : Service() {
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.CENTER or Gravity.TOP; y = 140 }
+        ).apply { gravity = Gravity.CENTER or Gravity.TOP; y = 120 }
     }
 
     private data class LinearLayoutDetail(val t1: LinearLayout, val t2: TextView)
@@ -397,7 +408,7 @@ class OverlayService : Service() {
     }
 
     // Suma km y minutos de las dos líneas inferiores (con "min" y "km"), o null si no son 2.
-    private fun extractTrip(result: com.google.mlkit.vision.text.Text): Pair<Double, Double>? {
+    private fun extractTrip(result: com.google.mlkit.vision.text.Text): Trip? {
         val kmCandidates = result.textBlocks.flatMap { b -> b.lines.map { it.text } }
             .filter { it.lowercase().contains("km") }
         if (kmCandidates.isNotEmpty()) {
@@ -417,7 +428,23 @@ class OverlayService : Service() {
         }
         if (found.size != 2) return null  // solo la pantalla de una tarifa (exactamente 2 km/tiempos)
         found.sortByDescending { it.first }  // las dos más bajas en pantalla
-        return Pair(found[0].second + found[1].second, found[0].third + found[1].third)
+        val k1 = found[0].second
+        val k2 = found[1].second
+        return Trip(k1 + k2, found[0].third + found[1].third, minOf(k1, k2))
+    }
+
+    private data class Trip(val kmSum: Double, val minSum: Double, val firstKm: Double)
+
+    private fun classifyProximity(firstKm: Double): String = when {
+        firstKm < PROX_NEAR -> "Cerca"
+        firstKm <= PROX_FAR -> "Regular"
+        else -> "Lejos"
+    }
+
+    private fun proximityColor(prox: String): Int = when (prox) {
+        "Cerca" -> Color.rgb(76, 217, 100)
+        "Regular" -> Color.rgb(255, 195, 0)
+        else -> Color.rgb(255, 69, 58)
     }
 
     private fun classify(rate: Double): String {
@@ -557,8 +584,9 @@ class OverlayService : Service() {
         val amountStr = bestLine?.text?.let { extractAmount(it) }
         val price = amountStr?.let { parseAmount(it) }
         val trip = extractTrip(result)
-        val kmSum = trip?.first
-        val minSum = trip?.second
+        val kmSum = trip?.kmSum
+        val minSum = trip?.minSum
+        val firstKm = trip?.firstKm
         val stops = extractStops(result)
 
         val now = System.currentTimeMillis()
@@ -602,6 +630,10 @@ class OverlayService : Service() {
             if (pendingFrames >= SHOW_AFTER_FRAMES) {
                 setOverlayVisible(true)
                 priceValue?.text = amountStr
+                verdictValue?.text = ""
+                verdictBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
+                proxValue?.text = ""
+                proxBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
                 rateValue?.text = ""
                 rateBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
                 timeValue?.text = ""
@@ -618,6 +650,23 @@ class OverlayService : Service() {
         if (pendingFrames >= SHOW_AFTER_FRAMES) {
             setOverlayVisible(true)
             priceValue?.text = amountStr
+            // Evaluación (veredicto)
+            verdictValue?.text = verdict
+            verdictBox?.let { b ->
+                b.setBackgroundColor(verdictColor(verdict))
+                for (i in 0 until b.childCount) {
+                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
+                }
+            }
+            // Distancia (proximidad por el primer km)
+            val prox = classifyProximity(firstKm ?: Double.MAX_VALUE)
+            proxValue?.text = prox
+            proxBox?.let { b ->
+                b.setBackgroundColor(proximityColor(prox))
+                for (i in 0 until b.childCount) {
+                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
+                }
+            }
             rateValue?.text = "${"%.0f".format(rate)}"
             rateBox?.let { b ->
                 b.setBackgroundColor(verdictColor(verdict))
@@ -634,11 +683,9 @@ class OverlayService : Service() {
             }
             if (shownPrice != amountStr) {
                 shownPrice = amountStr
-                priceTextView?.text = verdict
-                priceTextView?.setTextColor(verdictColor(verdict))
                 Log.i(
                     TAG,
-                    "RESULT price=$price km=$kmSum min=$minSum rate=${"%.0f".format(rate)}($verdict) rateMin=${"%.0f".format(rateMin)}($timeVerdict) stops=$stops"
+                    "RESULT price=$price km=$kmSum min=$minSum prox=$prox rate=${"%.0f".format(rate)}($verdict) rateMin=${"%.0f".format(rateMin)}($timeVerdict) stops=$stops"
                 )
                 if (verdict == "BUENO") alertGood()
             }
