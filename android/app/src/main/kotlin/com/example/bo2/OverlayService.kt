@@ -56,7 +56,7 @@ class OverlayService : Service() {
         private const val MASK_TOP = 0.06f
         private const val MASK_BOTTOM = 0.30f
         private val AMOUNT_REGEX = Regex("""\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?""")
-        private val KM_VALUE_REGEX = Regex("""(?i)([0-9]+(?:[.,][0-9]+)?)\s*km""")
+        private val KM_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*km""")
         private val MIN_VALUE_REGEX = Regex("""(?i)([0-9]{1,3})\s*min""")
         private const val RATE_NORMAL_MIN = 1100.0
         private const val RATE_NORMAL_MAX = 1300.0
@@ -407,6 +407,10 @@ class OverlayService : Service() {
         return t.toDoubleOrNull()
     }
 
+    // Limpia errores comunes de OCR en números (l/I -> 1, O/o -> 0).
+    private fun ocrNumber(s: String): String =
+        s.replace('l', '1').replace('I', '1').replace('O', '0').replace('o', '0')
+
     // Suma km y minutos de las dos líneas inferiores (con "min" y "km"), o null si no son 2.
     private fun extractTrip(result: com.google.mlkit.vision.text.Text): Trip? {
         val kmCandidates = result.textBlocks.flatMap { b -> b.lines.map { it.text } }
@@ -421,8 +425,8 @@ class OverlayService : Service() {
                 if (!low.contains("min") || !low.contains("km")) continue
                 val kmM = KM_VALUE_REGEX.find(line.text) ?: continue
                 val minM = MIN_VALUE_REGEX.find(line.text) ?: continue
-                val km = kmM.groupValues[1].replace(",", ".").toDoubleOrNull() ?: continue
-                val minutes = minM.groupValues[1].toDoubleOrNull() ?: continue
+                val km = ocrNumber(kmM.groupValues[1]).replace(",", ".").toDoubleOrNull() ?: continue
+                val minutes = ocrNumber(minM.groupValues[1]).toDoubleOrNull() ?: continue
                 found.add(Triple(line.boundingBox?.top ?: 0, km, minutes))
             }
         }
@@ -457,18 +461,26 @@ class OverlayService : Service() {
         }
     }
 
-    // Número de paradas SOLO si hay un número junto a "parada" (ignora encabezados "Paradas" sin cifra).
-    private fun extractStops(result: com.google.mlkit.vision.text.Text): Int? {
+    // Número de paradas/destinos SOLO si hay un número junto a "parada" o "destino".
+    private fun extractStops(result: com.google.mlkit.vision.text.Text): Pair<Int, String>? {
+        val debug = result.textBlocks.flatMap { b -> b.lines.map { it.text } }
+            .filter { it.lowercase().contains("dest") || it.lowercase().contains("parad") }
+        if (debug.isNotEmpty()) Log.d(TAG, "STOPS hint: ${debug.joinToString(" | ")}")
         val numRe = Regex("""\d{1,2}""")
         for (block in result.textBlocks) {
             for (line in block.lines) {
-                if (!line.text.lowercase().contains("parada")) continue
-                val m = numRe.find(line.text) ?: continue // "Paradas" sin número -> no es un conteo
-                Log.d(TAG, "STOPS: '${line.text}' -> ${m.value}")
-                return m.value.toInt().coerceAtLeast(1)
+                val low = line.text.lowercase()
+                val noun = when {
+                    low.contains("destin") -> "destino"
+                    low.contains("parad") -> "parada"
+                    else -> continue // "1destino", "2 paradas", "Destinos", etc.
+                }
+                val m = numRe.find(ocrNumber(line.text)) ?: continue // "l destino"→"1 destino", "2 paradas", etc.
+                Log.d(TAG, "STOPS: '${line.text}' -> ${m.value} ($noun)")
+                return (m.value.toInt().coerceAtLeast(1)) to noun
             }
         }
-        Log.d(TAG, "STOPS: sin paradas numeradas")
+        Log.d(TAG, "STOPS: sin paradas/destinos numerados")
         return null
     }
 
@@ -587,12 +599,12 @@ class OverlayService : Service() {
         val kmSum = trip?.kmSum
         val minSum = trip?.minSum
         val firstKm = trip?.firstKm
-        val stops = extractStops(result)
+        val stopsInfo = extractStops(result)
 
         val now = System.currentTimeMillis()
         if (now - lastLog > 2000) {
             lastLog = now
-            Log.i(TAG, "lines=$totalLines amt='$amountStr' price=$price km=$kmSum min=$minSum stops=$stops overlay=$overlayVisible")
+            Log.i(TAG, "lines=$totalLines amt='$amountStr' price=$price km=$kmSum min=$minSum stops=${stopsInfo?.first} overlay=$overlayVisible")
         }
 
         if (price == null || amountStr == null) {
@@ -609,10 +621,12 @@ class OverlayService : Service() {
 
         missFrames = 0
         // Las paradas se refrescan SIEMPRE que haya precio (aunque falten km/min).
-        val hasStops = stops != null
+        val hasStops = stopsInfo != null
         stopsBox?.visibility = if (hasStops) android.view.View.VISIBLE else android.view.View.GONE
         stopsValue?.text = if (hasStops) {
-            "${stops} parada${if (stops!! > 1) "s" else ""}"
+            val n = stopsInfo!!.first
+            val noun = stopsInfo!!.second
+            "$n $noun${if (n > 1) "s" else ""}"
         } else {
             ""
         }
@@ -685,7 +699,7 @@ class OverlayService : Service() {
                 shownPrice = amountStr
                 Log.i(
                     TAG,
-                    "RESULT price=$price km=$kmSum min=$minSum prox=$prox rate=${"%.0f".format(rate)}($verdict) rateMin=${"%.0f".format(rateMin)}($timeVerdict) stops=$stops"
+                    "RESULT price=$price km=$kmSum min=$minSum prox=$prox rate=${"%.0f".format(rate)}($verdict) rateMin=${"%.0f".format(rateMin)}($timeVerdict) stops=${stopsInfo?.first}"
                 )
                 if (verdict == "BUENO") alertGood()
             }
