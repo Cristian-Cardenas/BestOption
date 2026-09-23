@@ -58,13 +58,12 @@ class OverlayService : Service() {
         private val AMOUNT_REGEX = Regex("""\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?""")
         private val KM_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*km""")
         private val METERS_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*m\b""")
-        private val MIN_VALUE_REGEX = Regex("""(?i)([0-9]{1,3})\s*min""")
+        private val MIN_VALUE_REGEX = Regex("""(?i)([0-9loIO]{1,3})\s*min""")
         private const val RATE_NORMAL_MIN = 1100.0
         private const val RATE_NORMAL_MAX = 1300.0
-        private const val TIME_NORMAL_MIN = 450.0
-        private const val TIME_NORMAL_MAX = 650.0
-        private const val PROX_NEAR = 1.6   // primer km: < 1.6 = Cerca
-        private const val PROX_FAR = 2.0    // primer km: > 2.0 = Lejos
+        private const val TIME_NORMAL_MIN = 27000.0 // COP/ahora: 450/min * 60
+        private const val TIME_NORMAL_MAX = 39000.0 // 650/min * 60
+        private const val PROX_LIMIT = 2.0  // primer km: <= límite = Cerca, > límite = Lejos
     }
 
     private lateinit var windowManager: WindowManager
@@ -139,6 +138,7 @@ class OverlayService : Service() {
         )
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        migrateTimePrefs()
         if (intent?.action == ACTION_STOP) {
             stopSelf()
             return START_NOT_STICKY
@@ -216,10 +216,10 @@ class OverlayService : Service() {
         topRow.addView(proxD.t1, boxLp)
         topRow.addView(rateD.t1, boxLp)
 
-        // Fila inferior: Precio | COP/min | Paradas (condicional)
+        // Fila inferior: Precio | COP/h | Paradas (condicional)
         val priceD = box("Precio")
         priceValue = priceD.t2
-        val timeD = box("COP/min")
+        val timeD = box("COP/h")
         timeValue = timeD.t2
         timeBox = timeD.t1
         val stopsD = box("Paradas")
@@ -438,11 +438,10 @@ class OverlayService : Service() {
 
     private data class Trip(val kmSum: Double, val minSum: Double, val firstKm: Double)
 
-    private fun classifyProximity(firstKm: Double): String = when {
-        firstKm < PROX_NEAR -> "Cerca"
-        firstKm <= PROX_FAR -> "Regular"
-        else -> "Lejos"
-    }
+    private fun proxLimit(): Double = defaultPrefs().getFloat("prox", PROX_LIMIT.toFloat()).toDouble()
+
+    private fun classifyProximity(firstKm: Double): String =
+        if (firstKm <= proxLimit()) "Cerca" else "Lejos"
 
     private fun proximityColor(prox: String): Int = when (prox) {
         "Cerca" -> Color.rgb(76, 217, 100)
@@ -481,6 +480,19 @@ class OverlayService : Service() {
     }
 
     private fun defaultPrefs(): SharedPreferences = getSharedPreferences("bo2_config", 0)
+
+    // Migra umbrales de tiempo legacy (COP/min < 1000) a COP/hora (x60).
+    private fun migrateTimePrefs() {
+        val p = defaultPrefs()
+        val tm = p.getFloat("time_min", TIME_NORMAL_MIN.toFloat())
+        if (tm > 0f && tm < 1000f) {
+            p.edit()
+                .putFloat("time_min", tm * 60f)
+                .putFloat("time_max", p.getFloat("time_max", TIME_NORMAL_MAX.toFloat()) * 60f)
+                .apply()
+            Log.i(TAG, "migrado time_min $tm/min -> ${tm * 60}/h")
+        }
+    }
 
     private fun normalMin(): Double = defaultPrefs().getFloat("rate_min", RATE_NORMAL_MIN.toFloat()).toDouble()
 
@@ -652,7 +664,7 @@ class OverlayService : Service() {
 
         val rate = price / kmSum
         val verdict = classify(rate)
-        val rateMin = price / minSum
+        val rateMin = price / minSum * 60.0 // COP por hora
         val timeVerdict = classifyTime(rateMin)
 
         if (pendingFrames >= SHOW_AFTER_FRAMES) {
