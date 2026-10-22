@@ -11,6 +11,7 @@ import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.AudioManager
@@ -24,6 +25,7 @@ import android.os.HandlerThread
 import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
+import android.text.TextUtils
 import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
@@ -44,7 +46,7 @@ class OverlayService : Service() {
         const val EXTRA_RESULT_DATA = "media_projection_result_data"
         const val ACTION_STOP = "com.example.bo2.ACTION_STOP"
         private const val FRAME_INTERVAL_MS = 1500L  // barrido de captura
-        private const val MAX_DETECT_WIDTH = 480     // ancho al que se escala antes del OCR (menor = menos CPU)
+        private const val MAX_DETECT_WIDTH = 720     // ancho al que se escala antes del OCR (más alto = lee letra pequeña)
         private const val THUMB_WIDTH = 64           // ancho del thumbnail para comparar cambios
         private const val SCREEN_CHANGE_THRESHOLD = 0.005f // fracción de píxeles cambiados para disparar OCR
         private const val PIXEL_DIFF_THRESHOLD = 20  // delta de luminancia por canal (0..255)
@@ -64,21 +66,42 @@ class OverlayService : Service() {
         private const val TIME_NORMAL_MIN = 27000.0 // COP/ahora: 450/min * 60
         private const val TIME_NORMAL_MAX = 39000.0 // 650/min * 60
         private const val PROX_LIMIT = 2.0  // primer km: <= límite = Cerca, > límite = Lejos
+        private const val INVALID_HIDE_AFTER_FRAMES = 2 // lecturas sin ruta antes de ocultar (anti-parpadeo)
+        private const val MAX_ADDRESS_GAP = 170           // píxeles (ancho OCR 720) entre tramo y dirección
+        private val COMUNA_HINT = Regex("""(?i)\bcomuna\s*(\d{1,2})""")
+
+        // Rangos amplios para descartar números que no son tarifas de viaje.
+        private const val MIN_FARE = 1000.0
+        private const val MAX_FARE = 1000000.0
+        private const val MIN_TRIP_KM = 0.2
+        private const val MAX_TRIP_KM = 200.0
+        private const val MIN_TRIP_MIN = 1.0
+        private const val MAX_TRIP_MIN = 240.0
+        private const val MIN_RATE_PER_KM = 100.0
+        private const val MAX_RATE_PER_KM = 20000.0
+        private const val MIN_RATE_PER_HOUR = 2000.0
+        private const val MAX_RATE_PER_HOUR = 2000000.0
     }
 
     private lateinit var windowManager: WindowManager
     private var overlayView: LinearLayout? = null
     private var overlayParams: WindowManager.LayoutParams? = null
+    private var overlayBgView: android.view.View? = null
+    private var overlayBgParams: WindowManager.LayoutParams? = null
     private var overlayVisible = false
     private var proxValue: TextView? = null
     private var proxBox: LinearLayout? = null
-    private var priceValue: TextView? = null
     private var rateValue: TextView? = null
     private var rateBox: LinearLayout? = null
     private var timeValue: TextView? = null
     private var timeBox: LinearLayout? = null
     private var stopsValue: TextView? = null
     private var stopsBox: LinearLayout? = null
+    private var inicioTitle: TextView? = null
+    private var inicioValue: TextView? = null
+    private var destinoTitle: TextView? = null
+    private var destinoValue: TextView? = null
+    private lateinit var barrioIndex: BarrioIndex
     private var missFrames = 0
     private val channelId = "overlay_service"
     private val notificationId = 1001
@@ -119,6 +142,7 @@ class OverlayService : Service() {
         } else {
             startForeground(notificationId, notification)
         }
+        barrioIndex = BarrioIndex(this)
         buildOverlay()
     }
 
@@ -160,84 +184,171 @@ class OverlayService : Service() {
         if (!Settings.canDrawOverlays(this)) return
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
+        val density = resources.displayMetrics.density
+        val cardW = minOf(
+            (360f * density).toInt(),
+            resources.displayMetrics.widthPixels - (32f * density).toInt()
+        )
+        val accent = Color.rgb(157, 183, 255)
+        val labelColor = Color.rgb(145, 155, 178)
+        val neutralColor = Color.rgb(139, 149, 168)
+        val pillColor = Color.argb(22, 255, 255, 255)
+        val dividerColor = Color.argb(30, 255, 255, 255)
+
+        fun rounded(color: Int, radiusDp: Float): GradientDrawable = GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radiusDp * density
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(20, 12, 20, 12)
-            setBackgroundColor(Color.argb(150, 15, 24, 48)) // fondo semi-transparente
-        }
-        val minBoxW = (96f * resources.displayMetrics.density).toInt()
-        val boxLp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-        ).apply {
-            marginStart = 5
-            marginEnd = 5
+            setPadding(
+                (14f * density).toInt(), (12f * density).toInt(),
+                (14f * density).toInt(), (11f * density).toInt()
+            )
+            background = GradientDrawable(
+                GradientDrawable.Orientation.TL_BR,
+                intArrayOf(Color.rgb(8, 11, 18), Color.rgb(0, 0, 0))
+            ).apply {
+                cornerRadius = 18f * density
+                setStroke((1f * density).toInt(), Color.argb(70, 255, 255, 255))
+            }
+            elevation = 8f * density
         }
 
-        fun box(title: String): LinearLayoutDetail {
-            val b = LinearLayout(this@OverlayService).apply {
+        fun stat(label: String): LinearLayoutDetail {
+            val col = LinearLayout(this@OverlayService).apply {
                 orientation = LinearLayout.VERTICAL
-                setPadding(14, 9, 14, 9)
-                setMinimumWidth(minBoxW)
-                setBackgroundColor(Color.argb(200, 0, 0, 0))
+                gravity = Gravity.CENTER
+                setPadding((2f * density).toInt(), 0, (2f * density).toInt(), 0)
             }
             val tl = TextView(this@OverlayService).apply {
-                text = title
-                textSize = 11f
-                setTextColor(Color.rgb(170, 185, 230))
-                gravity = Gravity.CENTER
-            }
-            b.addView(tl)
-            val tv = TextView(this@OverlayService).apply {
-                text = ""
-                textSize = 17f
-                setTextColor(Color.WHITE)
+                text = label
+                textSize = 9f
+                setTextColor(labelColor)
                 gravity = Gravity.CENTER
                 setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
-                setSingleLine(true)
-                setMaxLines(1)
+                letterSpacing = 0.08f
+                maxLines = 1
             }
-            b.addView(tv)
-            return LinearLayoutDetail(b, tv)
+            col.addView(tl)
+            val tv = TextView(this@OverlayService).apply {
+                text = "—"
+                textSize = 15f
+                setTextColor(neutralColor)
+                gravity = Gravity.CENTER
+                setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+                setPadding(
+                    (7f * density).toInt(), (2f * density).toInt(),
+                    (7f * density).toInt(), (2f * density).toInt()
+                )
+            }
+            col.addView(tv)
+            return LinearLayoutDetail(col, tv)
         }
 
-        // Fila superior: Distancia (proximidad) | COP/km
-        val proxD = box("Distancia")
+        fun directionColumn(label: String): DirectionView {
+            val col = LinearLayout(this@OverlayService).apply {
+                orientation = LinearLayout.VERTICAL
+                background = rounded(pillColor, 12f)
+                setPadding(
+                    (10f * density).toInt(), (8f * density).toInt(),
+                    (10f * density).toInt(), (8f * density).toInt()
+                )
+            }
+            val tl = TextView(this@OverlayService).apply {
+                text = label
+                textSize = 10f
+                setTextColor(accent)
+                gravity = Gravity.START
+                setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+                letterSpacing = 0.06f
+                maxLines = 1
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            col.addView(tl)
+            val tv = TextView(this@OverlayService).apply {
+                text = "—"
+                textSize = 14f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.START
+                setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+                maxLines = 2
+                ellipsize = TextUtils.TruncateAt.END
+            }
+            col.addView(tv)
+            return DirectionView(col, tl, tv)
+        }
+
+        val inicioD = directionColumn("Inicio")
+        inicioTitle = inicioD.title
+        inicioValue = inicioD.value
+        val destinoD = directionColumn("Destino")
+        destinoTitle = destinoD.title
+        destinoValue = destinoD.value
+
+        val arrow = TextView(this).apply {
+            text = "→"
+            textSize = 20f
+            setTextColor(accent)
+            gravity = Gravity.CENTER
+            setPadding((8f * density).toInt(), 0, (8f * density).toInt(), 0)
+        }
+
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        header.addView(inicioD.box, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+        header.addView(arrow, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+        header.addView(destinoD.box, LinearLayout.LayoutParams(
+            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
+        ))
+
+        val divider = android.view.View(this).apply { setBackgroundColor(dividerColor) }
+        val dividerLp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, (1f * density).toInt()
+        ).apply {
+            topMargin = (10f * density).toInt()
+            bottomMargin = (8f * density).toInt()
+        }
+
+        val proxD = stat("DISTANCIA")
         proxBox = proxD.t1
         proxValue = proxD.t2
-        val rateD = box("COP/km")
+        val rateD = stat("COP/KM")
         rateValue = rateD.t2
         rateBox = rateD.t1
-        val topRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER
-            setPadding(0, 8, 0, 0)
-        }
-        topRow.addView(proxD.t1, boxLp)
-        topRow.addView(rateD.t1, boxLp)
-
-        // Fila inferior: Precio | COP/h | Paradas (condicional)
-        val priceD = box("Precio")
-        priceValue = priceD.t2
-        val timeD = box("COP/h")
+        val timeD = stat("COP/H")
         timeValue = timeD.t2
         timeBox = timeD.t1
-        val stopsD = box("Paradas")
+        val stopsD = stat("PARADAS")
         stopsValue = stopsD.t2
-        stopsValue?.setTextColor(Color.rgb(255, 80, 80))
         stopsBox = stopsD.t1
         stopsBox?.visibility = android.view.View.GONE
-        val bottomRow = LinearLayout(this).apply {
+
+        val stats = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER
-            setPadding(0, 6, 0, 0)
         }
-        bottomRow.addView(priceD.t1, boxLp)
-        bottomRow.addView(timeD.t1, boxLp)
-        bottomRow.addView(stopsD.t1, boxLp)
+        stats.addView(proxD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        stats.addView(rateD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        stats.addView(timeD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        stats.addView(stopsD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-        root.addView(topRow)
-        root.addView(bottomRow)
+        root.addView(header, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
+        root.addView(divider, dividerLp)
+        root.addView(stats, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ))
         overlayView = root
 
         val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -246,33 +357,78 @@ class OverlayService : Service() {
             @Suppress("DEPRECATION") WindowManager.LayoutParams.TYPE_PHONE
         }
         overlayParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
+            cardW,
             WindowManager.LayoutParams.WRAP_CONTENT,
             type,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.CENTER or Gravity.TOP; y = 120 }
+        ).apply {
+            gravity = Gravity.CENTER or Gravity.TOP
+            y = (64f * density).toInt()
+            alpha = 1.0f
+        }
+
+        // El sistema limita las ventanas overlay a alpha 0.8. Una segunda ventana
+        // negra detrás sube la opacidad efectiva a ~0.96 y la tarjeta se ve sólida.
+        val bg = android.view.View(this).apply {
+            background = rounded(Color.BLACK, 18f)
+        }
+        val bgParams = WindowManager.LayoutParams(
+            cardW,
+            1,
+            type,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.CENTER or Gravity.TOP
+            y = (64f * density).toInt()
+            alpha = 1.0f
+        }
+        overlayBgView = bg
+        overlayBgParams = bgParams
+
+        root.addOnLayoutChangeListener { _, _, _, _, bottom, _, _, _, oldBottom ->
+            if (bottom > 0 && bottom != oldBottom) {
+                val bp = overlayBgParams ?: return@addOnLayoutChangeListener
+                if (bp.height != bottom) {
+                    bp.height = bottom
+                    val bgView = overlayBgView
+                    if (bgView != null) {
+                        runCatching { windowManager.updateViewLayout(bgView, bp) }
+                    }
+                }
+            }
+        }
     }
 
     private data class LinearLayoutDetail(val t1: LinearLayout, val t2: TextView)
+
+    private data class DirectionView(val box: LinearLayout, val title: TextView, val value: TextView)
 
     private fun setOverlayVisible(visible: Boolean) {
         if (visible == overlayVisible) return
         Log.i(TAG, "overlay -> ${if (visible) "SHOW" else "HIDE"}")
         val view = overlayView ?: return
         val params = overlayParams ?: return
+        val bg = overlayBgView
+        val bgParams = overlayBgParams
         if (visible) {
             try {
+                if (bg != null && bgParams != null) {
+                    windowManager.addView(bg, bgParams)
+                }
                 windowManager.addView(view, params)
                 overlayVisible = true
             } catch (_: Exception) {
+                if (bg != null) runCatching { windowManager.removeView(bg) }
             }
         } else {
             try {
                 windowManager.removeView(view)
-                overlayVisible = false
             } catch (_: Exception) {
             }
+            if (bg != null) runCatching { windowManager.removeView(bg) }
+            overlayVisible = false
         }
     }
 
@@ -406,37 +562,113 @@ class OverlayService : Service() {
     private fun ocrNumber(s: String): String =
         s.replace('l', '1').replace('I', '1').replace('O', '0').replace('o', '0')
 
-    // Suma km y minutos de las dos líneas de viaje (cada una con "min"), o null si no son 2.
+    // Distancia de un texto en km ("3 km", "10,9 km", "1.1 km", "661 m").
+    private fun distanceKm(text: String): Double? {
+        val kmM = KM_VALUE_REGEX.find(text)
+        if (kmM != null) {
+            return ocrNumber(kmM.groupValues[1]).replace(",", ".").toDoubleOrNull()
+        }
+        val mM = METERS_VALUE_REGEX.find(text) ?: return null
+        val meters = ocrNumber(mM.groupValues[1]).replace(",", ".").toDoubleOrNull() ?: return null
+        return meters / 1000.0
+    }
+
+    // Extrae los tramos "N min (D km)" de la oferta. Tolera distancias en metros,
+    // que el OCR separe la distancia en otra línea y ofertas con paradas.
     private fun extractTrip(result: com.google.mlkit.vision.text.Text): Trip? {
-        val found = mutableListOf<Triple<Int, Double, Double>>() // y, km, min
+        val legs = mutableListOf<Leg>() // y, km, min
+        val allLines = mutableListOf<LineInfo>()
+        var hasPixelTops = true
         for (block in result.textBlocks) {
             for (line in block.lines) {
                 val text = line.text
+                val box = line.boundingBox
+                if (box != null) allLines.add(LineInfo(box.top, text))
                 if (!text.lowercase().contains("min")) continue
                 val minM = MIN_VALUE_REGEX.find(text) ?: continue
                 val minutes = ocrNumber(minM.groupValues[1]).toDoubleOrNull() ?: continue
-                // Distancia: prefiere "km"; si no, metros ("m") -> convertir a km (/1000).
-                val kmM = KM_VALUE_REGEX.find(text)
-                val km = if (kmM != null) {
-                    ocrNumber(kmM.groupValues[1]).replace(",", ".").toDoubleOrNull()
-                } else {
-                    val mM = METERS_VALUE_REGEX.find(text)
-                    if (mM != null)
-                        (ocrNumber(mM.groupValues[1]).replace(",", ".").toDoubleOrNull() ?: 0.0) / 1000.0
-                    else null
-                } ?: continue
+                val km = distanceKm(text) ?: continue
                 Log.d(TAG, "tripLine: '${text}' -> ${km} km, ${minutes} min")
-                found.add(Triple(line.boundingBox?.top ?: 0, km, minutes))
+                legs.add(Leg(box?.top ?: 0, km, minutes))
             }
         }
-        if (found.size != 2) return null  // solo la pantalla de una tarifa (exactamente 2 líneas tiempo/distancia)
-        found.sortByDescending { it.first }  // las dos más bajas en pantalla
-        val k1 = found[0].second
-        val k2 = found[1].second
-        return Trip(k1 + k2, found[0].third + found[1].third, minOf(k1, k2))
+
+        // Fallback: el OCR a veces parte "8 min" y "(3 km)" en líneas distintas.
+        if (legs.size < 2) {
+            val fallback = mutableListOf<Leg>()
+            val joined = result.text
+            for (m in MIN_VALUE_REGEX.findAll(joined)) {
+                val minutes = ocrNumber(m.groupValues[1]).toDoubleOrNull() ?: continue
+                val tail = joined.substring(m.range.last + 1).take(24)
+                val km = distanceKm(tail) ?: continue
+                fallback.add(Leg(m.range.first, km, minutes))
+            }
+            if (fallback.size > legs.size) {
+                legs.clear()
+                legs.addAll(fallback)
+                hasPixelTops = false
+                Log.d(TAG, "tripFallback: ${legs.size} tramo(s)")
+            }
+        }
+
+        if (legs.isEmpty()) return null
+
+        // Se conservan como máximo los dos tramos más bajos en pantalla (recogida y
+        // viaje); en ofertas con parada siguen siendo esos dos.
+        val chosen = legs.distinctBy { "${it.km}-${it.min}" }
+            .sortedByDescending { it.top }
+            .take(2)
+        val kmSum = chosen.sumOf { it.km }
+        val minSum = chosen.sumOf { it.min }
+        // La recogida es el tramo más alto en pantalla. Con un solo tramo no es
+        // posible saber si es la recogida o el viaje: se deja sin proximidad.
+        val firstKm = if (chosen.size >= 2) chosen.minByOrNull { it.top }?.km else null
+        // Coordenada del inicio de la ruta (solo si viene de líneas reales del OCR).
+        val routeTop = if (hasPixelTops) chosen.minOfOrNull { it.top } else null
+
+        // Direcciones: en la tarjeta de oferta van justo debajo de cada tramo.
+        val usablePixels = hasPixelTops && chosen.all { it.top > 0 }
+        val pickupLeg = if (chosen.size >= 2) chosen.minByOrNull { it.top } else null
+        val destLeg = chosen.maxByOrNull { it.top }
+        val pickupAddress = if (usablePixels && pickupLeg != null) {
+            findAddressBelow(pickupLeg.top, destLeg?.top ?: Int.MAX_VALUE, allLines)
+        } else null
+        val destAddress = if (usablePixels && destLeg != null) {
+            findAddressBelow(destLeg.top, Int.MAX_VALUE, allLines)
+        } else null
+        if (pickupAddress == null && pickupLeg != null && destLeg != null) {
+            val nearby = allLines
+                .filter { it.top > pickupLeg.top && it.top < destLeg.top }
+                .sortedBy { it.top }
+                .joinToString(" || ") { "${it.top}:${it.text.take(28)}" }
+            Log.d(TAG, "sin dirección recogida (${pickupLeg.top}-${destLeg.top}): $nearby")
+        }
+        return Trip(kmSum, minSum, firstKm, routeTop, pickupAddress, destAddress)
     }
 
-    private data class Trip(val kmSum: Double, val minSum: Double, val firstKm: Double)
+    private fun findAddressBelow(legTop: Int, beforeTop: Int, lines: List<LineInfo>): String? {
+        var best: LineInfo? = null
+        for (l in lines) {
+            if (l.top <= legTop + 4 || l.top >= beforeTop) continue
+            if (l.top - legTop > MAX_ADDRESS_GAP) continue
+            if (!barrioIndex.looksLikeAddress(l.text)) continue
+            if (best == null || l.top < best.top) best = l
+        }
+        return best?.text?.trim()
+    }
+
+    private data class Leg(val top: Int, val km: Double, val min: Double)
+
+    private data class LineInfo(val top: Int, val text: String)
+
+    private data class Trip(
+        val kmSum: Double,
+        val minSum: Double,
+        val firstKm: Double?,
+        val routeTop: Int?,
+        val pickupAddress: String?,
+        val destAddress: String?
+    )
 
     private fun proxLimit(): Double = defaultPrefs().getFloat("prox", PROX_LIMIT.toFloat()).toDouble()
 
@@ -512,10 +744,57 @@ class OverlayService : Service() {
 
     private fun timeMax(): Double = defaultPrefs().getFloat("time_max", TIME_NORMAL_MAX.toFloat()).toDouble()
 
+    // Una oferta real debe tener ruta, valores creíbles y la ruta debajo del precio.
+    // Así un saldo o un precio suelto en pantalla no activa los cuadros.
+    private fun isValidOffer(price: Double, trip: Trip, priceLine: Text.Line?): Boolean {
+        if (price !in MIN_FARE..MAX_FARE) return false
+        if (trip.kmSum !in MIN_TRIP_KM..MAX_TRIP_KM) return false
+        if (trip.minSum !in MIN_TRIP_MIN..MAX_TRIP_MIN) return false
+        if (price / trip.kmSum !in MIN_RATE_PER_KM..MAX_RATE_PER_KM) return false
+        if (price / trip.minSum * 60.0 !in MIN_RATE_PER_HOUR..MAX_RATE_PER_HOUR) return false
+        // En las tarjetas de oferta el detalle de la ruta está debajo del precio.
+        val priceBottom = priceLine?.boundingBox?.bottom
+        val routeTop = trip.routeTop
+        if (priceBottom != null && routeTop != null && routeTop < priceBottom) return false
+        return true
+    }
+
     private fun verdictColor(verdict: String): Int = when (verdict) {
         "BUENO" -> Color.rgb(76, 217, 100)
         "REGULAR" -> Color.rgb(255, 195, 0)
         else -> Color.rgb(255, 69, 58)
+    }
+
+    // Pinta una métrica. Si falta el dato muestra "—" en gris y sin chip de color.
+    private fun renderMetric(value: TextView?, text: String?, color: Int?) {
+        value?.text = text ?: "—"
+        if (color != null) {
+            value?.setTextColor(color)
+            value?.background = metricChip(color)
+        } else {
+            value?.setTextColor(Color.rgb(139, 149, 168))
+            value?.background = null
+        }
+    }
+
+    private fun metricChip(color: Int): GradientDrawable = GradientDrawable().apply {
+        cornerRadius = 7f * resources.displayMetrics.density
+        setColor(Color.argb(38, Color.red(color), Color.green(color), Color.blue(color)))
+    }
+
+    private fun renderAddress(
+        title: TextView?,
+        value: TextView?,
+        label: String,
+        entry: BarrioIndex.Entry?,
+        fallback: String?
+    ) {
+        val comuna = entry?.comuna?.toIntOrNull()?.toString()
+            ?: fallback?.let { COMUNA_HINT.find(it)?.groupValues?.get(1)?.toIntOrNull()?.toString() }
+        title?.text = if (comuna != null) "$label · C$comuna" else label
+        val text = entry?.barrio ?: fallback?.replace("\n", " ")?.trim() ?: "—"
+        value?.text = text
+        value?.setTextColor(if (entry != null) Color.WHITE else Color.rgb(139, 149, 168))
     }
 
     // Alerta (solo pitido) cuando una tarifa es BUENO.
@@ -608,11 +887,18 @@ class OverlayService : Service() {
         val minSum = trip?.minSum
         val firstKm = trip?.firstKm
         val stopsInfo = extractStops(result)
+        val isOffer = price != null && trip != null && isValidOffer(price, trip, bestLine)
 
         val now = System.currentTimeMillis()
         if (now - lastLog > 2000) {
             lastLog = now
-            Log.i(TAG, "lines=$totalLines amt='$amountStr' price=$price km=$kmSum min=$minSum stops=${stopsInfo?.first} overlay=$overlayVisible")
+            Log.i(TAG, "lines=$totalLines amt='$amountStr' price=$price km=$kmSum min=$minSum stops=${stopsInfo?.first} offer=$isOffer overlay=$overlayVisible")
+            if (price != null && !isOffer) {
+                Log.d(
+                    TAG,
+                    "oferta descartada amt=$amountStr km=$kmSum min=$minSum routeTop=${trip?.routeTop} priceBottom=${bestLine?.boundingBox?.bottom}"
+                )
+            }
         }
 
         if (price == null || amountStr == null) {
@@ -627,16 +913,30 @@ class OverlayService : Service() {
             return
         }
 
+        if (!isOffer) {
+            // Hay un monto, pero no es una oferta de viaje (sin ruta creíble).
+            // Si es el mismo monto ya mostrado se tolera una lectura sin ruta para
+            // no parpadear; si es otro monto, se oculta de inmediato.
+            missFrames++
+            pendingFrames = 0
+            pendingPrice = null
+            val sameAmount = shownPrice == amountStr
+            if (!sameAmount || missFrames >= INVALID_HIDE_AFTER_FRAMES) {
+                shownPrice = null
+                setOverlayVisible(false)
+            }
+            return
+        }
+
         missFrames = 0
-        // Las paradas se refrescan SIEMPRE que haya precio (aunque falten km/min).
+        // Las paradas se refrescan siempre que sea una oferta válida.
         val hasStops = stopsInfo != null
         stopsBox?.visibility = if (hasStops) android.view.View.VISIBLE else android.view.View.GONE
-        stopsValue?.text = if (hasStops) {
-            val n = stopsInfo!!.first
-            val noun = stopsInfo!!.second
-            "$n $noun${if (n > 1) "s" else ""}"
+        if (hasStops) {
+            renderMetric(stopsValue, stopsInfo!!.first.toString(), Color.rgb(255, 99, 99))
         } else {
-            ""
+            stopsValue?.text = ""
+            stopsValue?.background = null
         }
 
         // Estabilidad: se muestra solo si aparece el mismo precio N frames seguidos.
@@ -647,57 +947,37 @@ class OverlayService : Service() {
             pendingFrames = 1
         }
 
-        if (kmSum == null || minSum == null) {
-            // Precio visible pero sin datos de viaje: mostrar precio + paradas, tasas en blanco.
-            if (pendingFrames >= SHOW_AFTER_FRAMES) {
-                setOverlayVisible(true)
-                priceValue?.text = amountStr
-                proxValue?.text = ""
-                proxBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
-                rateValue?.text = ""
-                rateBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
-                timeValue?.text = ""
-                timeBox?.setBackgroundColor(Color.argb(200, 0, 0, 0))
-            }
-            return
-        }
-
-        val rate = price / kmSum
-        val verdict = classify(rate)
-        val rateMin = price / minSum * 60.0 // COP por hora
-        val timeVerdict = classifyTime(rateMin)
+        val rate = kmSum?.takeIf { it > 0 }?.let { price / it }
+        val timeRate = minSum?.takeIf { it > 0 }?.let { price / it * 60.0 }
+        val verdict = rate?.let { classify(it) }
+        val timeVerdict = timeRate?.let { classifyTime(it) }
 
         if (pendingFrames >= SHOW_AFTER_FRAMES) {
+            val pickupAddress = trip?.pickupAddress
+            val destAddress = trip?.destAddress
+            val pickupEntry = pickupAddress?.let { barrioIndex.resolve(it) }
+            val destEntry = destAddress?.let { barrioIndex.resolve(it) }
+
             setOverlayVisible(true)
-            priceValue?.text = amountStr
-            // Distancia (proximidad por el primer km)
-            val prox = classifyProximity(firstKm ?: Double.MAX_VALUE)
-            proxValue?.text = prox
-            proxBox?.let { b ->
-                b.setBackgroundColor(proximityColor(prox))
-                for (i in 0 until b.childCount) {
-                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
-                }
-            }
-            rateValue?.text = "${"%.0f".format(rate)}"
-            rateBox?.let { b ->
-                b.setBackgroundColor(verdictColor(verdict))
-                for (i in 0 until b.childCount) {
-                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
-                }
-            }
-            timeValue?.text = "${"%.0f".format(rateMin)}"
-            timeBox?.let { b ->
-                b.setBackgroundColor(verdictColor(timeVerdict))
-                for (i in 0 until b.childCount) {
-                    (b.getChildAt(i) as? TextView)?.setTextColor(Color.BLACK)
-                }
-            }
+            renderAddress(inicioTitle, inicioValue, "Inicio", pickupEntry, pickupAddress)
+            renderAddress(destinoTitle, destinoValue, "Destino", destEntry, destAddress)
+
+            val prox = firstKm?.let { classifyProximity(it) }
+            val rateText = rate?.let { "%.0f".format(it) }
+            val timeText = timeRate?.let { "%.0f".format(it) }
+            renderMetric(proxValue, prox, prox?.let { proximityColor(it) })
+            renderMetric(rateValue, rateText, verdict?.let { verdictColor(it) })
+            renderMetric(timeValue, timeText, timeVerdict?.let { verdictColor(it) })
+
             if (shownPrice != amountStr) {
                 shownPrice = amountStr
                 Log.i(
                     TAG,
-                    "RESULT price=$price km=$kmSum min=$minSum prox=$prox rate=${"%.0f".format(rate)}($verdict) rateMin=${"%.0f".format(rateMin)}($timeVerdict) stops=${stopsInfo?.first}"
+                    "RESULT price=$price km=$kmSum min=$minSum prox=$prox rate=$rateText($verdict) rateHora=$timeText($timeVerdict) stops=${stopsInfo?.first}"
+                )
+                Log.i(
+                    TAG,
+                    "ADDR inicio='$pickupAddress' -> ${pickupEntry?.barrio} (C${pickupEntry?.comuna}); destino='$destAddress' -> ${destEntry?.barrio} (C${destEntry?.comuna})"
                 )
                 if (verdict == "BUENO") alertGood()
             }
@@ -715,6 +995,8 @@ class OverlayService : Service() {
         setOverlayVisible(false)
         overlayView = null
         overlayParams = null
+        overlayBgView = null
+        overlayBgParams = null
         recognizer.close()
         super.onDestroy()
     }
