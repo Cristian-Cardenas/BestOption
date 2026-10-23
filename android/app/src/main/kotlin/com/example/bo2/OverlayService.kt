@@ -57,9 +57,8 @@ class OverlayService : Service() {
         private const val MASK_RIGHT = 1.0f
         private const val MASK_TOP = 0.06f
         private const val MASK_BOTTOM = 0.30f
-        private val AMOUNT_REGEX = Regex("""\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?""")
-        private val KM_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*km""")
-        private val METERS_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*m\b""")
+        private val AMOUNT_REGEX = Regex("""[0-9lIOo]{1,3}(?:[.,][0-9lIOo]{3})+(?:[.,][0-9lIOo]{1,2})?""")
+        private val DISPLAYED_RATE_REGEX = Regex("""(?i)(?:COP|C0P|CO0)\s*([0-9lIOo][0-9lIOo.,]*)\s*/\s*k\s*[mn]""")
         private val MIN_VALUE_REGEX = Regex("""(?i)([0-9loIO]{1,3})\s*min""")
         private const val RATE_NORMAL_MIN = 1300.0
         private const val RATE_NORMAL_MAX = 1500.0
@@ -75,7 +74,7 @@ class OverlayService : Service() {
         private const val MAX_TRIP_KM = 200.0
         private const val MIN_TRIP_MIN = 1.0
         private const val MAX_TRIP_MIN = 240.0
-        private const val MIN_RATE_PER_KM = 100.0
+        private const val MIN_RATE_PER_KM = 300.0
         private const val MAX_RATE_PER_KM = 20000.0
     }
 
@@ -516,7 +515,7 @@ class OverlayService : Service() {
     // Extrae un monto (ej: "16,408", "10.725", "2,278.00") de la línea, o null si no es un monto.
     private fun extractAmount(text: String): String? {
         val m = AMOUNT_REGEX.find(text) ?: return null
-        val v = m.value
+        val v = ocrNumber(m.value)
         // Evitar números sueltos tipo "25" de direcciones/etiquetas.
         return if (v.filter { it.isDigit() }.length >= 3) v else null
     }
@@ -525,33 +524,83 @@ class OverlayService : Service() {
     // (COP: "16,408" y "10.725" = 16408 y 10725).
     private fun parseAmount(s: String): Double? {
         if (s.isEmpty()) return null
-        val hasDot = s.contains('.')
-        val hasComma = s.contains(',')
-        var t = s
+        var t = ocrNumber(s)
+        val hasDot = t.contains('.')
+        val hasComma = t.contains(',')
         when {
             hasDot && hasComma -> {
-                t = if (s.lastIndexOf('.') > s.lastIndexOf(',')) s.replace(",", "") else s.replace(".", "")
+                t = if (t.lastIndexOf('.') > t.lastIndexOf(',')) t.replace(",", "") else t.replace(".", "")
             }
-            hasDot -> t = s.replace(".", "")
-            hasComma -> t = s.replace(",", "")
+            hasDot -> t = t.replace(".", "")
+            hasComma -> t = t.replace(",", "")
         }
         return t.toDoubleOrNull()
+    }
+
+    private data class PriceChoice(val text: String, val value: Double)
+
+    /** Tarifa COP/km que la propia app muestra en la oferta (si existe). */
+    private fun extractDisplayedRate(text: String): Double? =
+        DISPLAYED_RATE_REGEX.find(text)?.groupValues?.get(1)?.let { parseAmount(it) }
+
+    /**
+     * El OCR a veces pierde un dígito del precio (por ejemplo lee 1.030 en vez de
+     * 11.030). Se contrasta con los kilómetros totales y con la tarifa COP/km que
+     * muestra la app; si el precio no cuadra, se usa esa tarifa como respaldo.
+     */
+    private fun choosePrice(
+        result: com.google.mlkit.vision.text.Text,
+        bestAmount: String?,
+        kmSum: Double?,
+        displayedRate: Double?
+    ): PriceChoice? {
+        val raw = LinkedHashSet<String>()
+        bestAmount?.let { raw.add(it) }
+        for (m in AMOUNT_REGEX.findAll(result.text)) {
+            if (m.value.filter { it.isDigit() }.length >= 3) raw.add(m.value)
+        }
+        val candidates = raw.mapNotNull { text ->
+            parseAmount(text)?.let { PriceChoice(text, it) }
+        }
+            .filter { it.value in MIN_FARE..MAX_FARE }
+            .distinctBy { it.value }
+        if (candidates.isEmpty()) return null
+        if (kmSum == null || kmSum <= 0.0) {
+            return candidates.firstOrNull { it.text == bestAmount } ?: candidates.first()
+        }
+
+        val best = candidates.firstOrNull { it.text == bestAmount }
+        if (displayedRate != null && displayedRate > 0.0) {
+            val consistent = candidates
+                .map { candidate -> candidate to abs(candidate.value / kmSum - displayedRate) / displayedRate }
+                .filter { it.second <= 0.15 }
+                .minByOrNull { it.second }
+            if (consistent != null) return consistent.first
+
+            // Ningún precio del OCR es compatible con la tarifa visible: se usa
+            // la tarifa de la app manteniendo la distancia total.
+            val fallback = displayedRate * kmSum
+            return PriceChoice("%.0f".format(fallback), fallback)
+        }
+
+        // Sin tarifa visible, si el precio elegido da un COP/km absurdo, se
+        // intenta con otro monto detectado en la pantalla.
+        val bestRate = RateCalculator.perKm(best?.value ?: 0.0, kmSum)
+        if (bestRate == null || bestRate < MIN_RATE_PER_KM) {
+            candidates
+                .filter { candidate ->
+                    val rate = RateCalculator.perKm(candidate.value, kmSum) ?: return@filter false
+                    rate in MIN_RATE_PER_KM..MAX_RATE_PER_KM
+                }
+                .maxByOrNull { it.value }
+                ?.let { return it }
+        }
+        return best ?: candidates.first()
     }
 
     // Limpia errores comunes de OCR en números (l/I -> 1, O/o -> 0).
     private fun ocrNumber(s: String): String =
         s.replace('l', '1').replace('I', '1').replace('O', '0').replace('o', '0')
-
-    // Distancia de un texto en km ("3 km", "10,9 km", "1.1 km", "661 m").
-    private fun distanceKm(text: String): Double? {
-        val kmM = KM_VALUE_REGEX.find(text)
-        if (kmM != null) {
-            return ocrNumber(kmM.groupValues[1]).replace(",", ".").toDoubleOrNull()
-        }
-        val mM = METERS_VALUE_REGEX.find(text) ?: return null
-        val meters = ocrNumber(mM.groupValues[1]).replace(",", ".").toDoubleOrNull() ?: return null
-        return meters / 1000.0
-    }
 
     // Extrae los tramos "N min (D km)" de la oferta. Tolera distancias en metros,
     // que el OCR separe la distancia en otra línea y ofertas con paradas.
@@ -567,7 +616,7 @@ class OverlayService : Service() {
                 if (!text.lowercase().contains("min")) continue
                 val minM = MIN_VALUE_REGEX.find(text) ?: continue
                 val minutes = ocrNumber(minM.groupValues[1]).toDoubleOrNull() ?: continue
-                val km = distanceKm(text) ?: continue
+                val km = DistanceParser.km(text) ?: continue
                 Log.d(TAG, "tripLine: '${text}' -> ${km} km, ${minutes} min")
                 legs.add(Leg(box?.top ?: 0, km, minutes))
             }
@@ -580,7 +629,7 @@ class OverlayService : Service() {
             for (m in MIN_VALUE_REGEX.findAll(joined)) {
                 val minutes = ocrNumber(m.groupValues[1]).toDoubleOrNull() ?: continue
                 val tail = joined.substring(m.range.last + 1).take(24)
-                val km = distanceKm(tail) ?: continue
+                val km = DistanceParser.km(tail) ?: continue
                 fallback.add(Leg(m.range.first, km, minutes))
             }
             if (fallback.size > legs.size) {
@@ -701,7 +750,8 @@ class OverlayService : Service() {
         if (trip.minSum !in MIN_TRIP_MIN..MAX_TRIP_MIN) return false
         val tripKm = trip.tripKm ?: return false
         if (tripKm !in MIN_TRIP_KM..MAX_TRIP_KM) return false
-        val perKm = RateCalculator.perKm(price, tripKm) ?: return false
+        // COP/km usa la distancia total: recogida + viaje (también si viene en metros).
+        val perKm = RateCalculator.perKm(price, trip.kmSum) ?: return false
         if (perKm !in MIN_RATE_PER_KM..MAX_RATE_PER_KM) return false
         // En las tarjetas de oferta el detalle de la ruta está debajo del precio.
         val priceBottom = priceLine?.boundingBox?.bottom
@@ -831,19 +881,22 @@ class OverlayService : Service() {
             }
         }
 
-        val amountStr = bestLine?.text?.let { extractAmount(it) }
-        val price = amountStr?.let { parseAmount(it) }
         val trip = extractTrip(result)
         val kmSum = trip?.kmSum
         val minSum = trip?.minSum
         val firstKm = trip?.firstKm
         val stopsInfo = extractStops(result)
+        val bestAmount = bestLine?.text?.let { extractAmount(it) }
+        val displayedRate = extractDisplayedRate(result.text)
+        val priceChoice = choosePrice(result, bestAmount, kmSum, displayedRate)
+        val amountStr = priceChoice?.text
+        val price = priceChoice?.value
         val isOffer = price != null && trip != null && isValidOffer(price, trip, bestLine)
 
         val now = System.currentTimeMillis()
         if (now - lastLog > 2000) {
             lastLog = now
-            Log.i(TAG, "lines=$totalLines amt='$amountStr' price=$price km=$kmSum min=$minSum stops=${stopsInfo?.first} offer=$isOffer overlay=$overlayVisible")
+            Log.i(TAG, "lines=$totalLines bestAmt='$bestAmount' visibleRate=$displayedRate amt='$amountStr' price=$price km=$kmSum min=$minSum stops=${stopsInfo?.first} offer=$isOffer overlay=$overlayVisible")
             if (price != null && !isOffer) {
                 Log.d(
                     TAG,
@@ -898,7 +951,7 @@ class OverlayService : Service() {
             pendingFrames = 1
         }
 
-        val rate = trip?.tripKm?.let { RateCalculator.perKm(price, it) }
+        val rate = trip?.kmSum?.let { RateCalculator.perKm(price, it) }
         val verdict = rate?.let { classify(it) }
 
         if (pendingFrames >= SHOW_AFTER_FRAMES) {
