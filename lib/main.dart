@@ -97,12 +97,10 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
   bool _permissionGranted = false;
   bool _running = false;
 
-  final _minCtrl = TextEditingController(text: '1100');
-  final _maxCtrl = TextEditingController(text: '1300');
-  final _timeMinCtrl = TextEditingController(text: '27000');
-    final _timeMaxCtrl = TextEditingController(text: '39000');
-    final _proxCtrl = TextEditingController(text: '2.0');
-      bool _saved = false;
+  final _minCtrl = TextEditingController(text: '1300');
+  final _maxCtrl = TextEditingController(text: '1500');
+  final _proxCtrl = TextEditingController(text: '2.0');
+  bool _saved = false;
 
   @override
   void initState() {
@@ -117,10 +115,8 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
     WidgetsBinding.instance.removeObserver(this);
     _minCtrl.dispose();
     _maxCtrl.dispose();
-    _timeMinCtrl.dispose();
-        _timeMaxCtrl.dispose();
-                _proxCtrl.dispose();
-                super.dispose();
+    _proxCtrl.dispose();
+    super.dispose();
   }
 
   @override
@@ -154,10 +150,8 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
       if (cfg != null) {
         _minCtrl.text = _formatRate((cfg['rateMin'] as num).toDouble());
         _maxCtrl.text = _formatRate((cfg['rateMax'] as num).toDouble());
-        _timeMinCtrl.text = _formatRate((cfg['timeMin'] as num).toDouble());
-        _timeMaxCtrl.text = _formatRate((cfg['timeMax'] as num).toDouble());
-                        _proxCtrl.text = _formatDec((cfg['prox'] as num).toDouble());
-                        if (mounted) setState(() => _saved = true);
+        _proxCtrl.text = _formatDec((cfg['prox'] as num).toDouble());
+        if (mounted) setState(() => _saved = true);
       }
     } on MissingPluginException {
       // widget test
@@ -167,24 +161,18 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
   Future<void> _saveConfig() async {
     final min = _parseRate(_minCtrl.text);
     final max = _parseRate(_maxCtrl.text);
-    final tmin = _parseRate(_timeMinCtrl.text);
-    final tmax = _parseRate(_timeMaxCtrl.text);
-        final pfar = _parseDec(_proxCtrl.text);
-                await _channel.invokeMethod('saveConfig', {
-                  'rateMin': min,
-                  'rateMax': max,
-                  'timeMin': tmin,
-                  'timeMax': tmax,
-                  'prox': pfar,
-                });
+    final pfar = _parseDec(_proxCtrl.text);
+    await _channel.invokeMethod('saveConfig', {
+      'rateMin': min,
+      'rateMax': max,
+      'prox': pfar,
+    });
     if (mounted) {
       setState(() {
         _minCtrl.text = _formatRate(min);
         _maxCtrl.text = _formatRate(max);
-        _timeMinCtrl.text = _formatRate(tmin);
-        _timeMaxCtrl.text = _formatRate(tmax);
-                        _proxCtrl.text = _formatDec(pfar);
-                        _saved = true;
+        _proxCtrl.text = _formatDec(pfar);
+        _saved = true;
       });
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Configuración guardada')));
     }
@@ -269,27 +257,23 @@ class _OverlayHomePageState extends State<OverlayHomePage> with WidgetsBindingOb
                   Text('Umbrales', style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 4),
                   Text(
-                    'COP/km: menor que el mínimo = MALO · entre = REGULAR · mayor que el máximo = BUENO\nCOP/h: el mismo criterio aplicado a sus dos umbrales.',
+                    'COP/km: menor que el mínimo = MALO · entre = REGULAR · mayor que el máximo = BUENO.',
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(color: OverlayApp._muted, height: 1.4),
                   ),
                   const SizedBox(height: 16),
                   _field(_minCtrl, 'Mínimo normal (COP/km)'),
                   const SizedBox(height: 12),
                   _field(_maxCtrl, 'Máximo normal (COP/km)'),
+                  const SizedBox(height: 18),
+                  Text('Distancia (primer km)', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Menor que el límite = Cerca · mayor que el límite = Lejos.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: OverlayApp._muted, height: 1.4),
+                  ),
                   const SizedBox(height: 14),
-                  _field(_timeMinCtrl, 'Mínimo normal (COP/h)'),
-                  const SizedBox(height: 12),
-                  _field(_timeMaxCtrl, 'Máximo normal (COP/h)'),
-                                    const SizedBox(height: 18),
-                                    Text('Distancia (primer km)', style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-                                                                        const SizedBox(height: 4),
-                                                                        Text(
-                                                                          'Menor que el límite = Cerca · mayor que el límite = Lejos.',
-                                                                          style: Theme.of(context).textTheme.bodySmall?.copyWith(color: OverlayApp._muted, height: 1.4),
-                                                                        ),
-                                                                        const SizedBox(height: 14),
-                                                                        _field(_proxCtrl, 'Límite Cerca/Lejos (km)'),
-                                                                        const SizedBox(height: 20),
+                  _field(_proxCtrl, 'Límite Cerca/Lejos (km)'),
+                  const SizedBox(height: 20),
                   Row(
                     children: [
                       Expanded(

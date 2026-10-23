@@ -61,10 +61,8 @@ class OverlayService : Service() {
         private val KM_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*km""")
         private val METERS_VALUE_REGEX = Regex("""(?i)([0-9loIO]+(?:[.,][0-9loIO]+)?)\s*m\b""")
         private val MIN_VALUE_REGEX = Regex("""(?i)([0-9loIO]{1,3})\s*min""")
-        private const val RATE_NORMAL_MIN = 1100.0
-        private const val RATE_NORMAL_MAX = 1300.0
-        private const val TIME_NORMAL_MIN = 27000.0 // COP/ahora: 450/min * 60
-        private const val TIME_NORMAL_MAX = 39000.0 // 650/min * 60
+        private const val RATE_NORMAL_MIN = 1300.0
+        private const val RATE_NORMAL_MAX = 1500.0
         private const val PROX_LIMIT = 2.0  // primer km: <= límite = Cerca, > límite = Lejos
         private const val INVALID_HIDE_AFTER_FRAMES = 2 // lecturas sin ruta antes de ocultar (anti-parpadeo)
         private const val MAX_ADDRESS_GAP = 170           // píxeles (ancho OCR 720) entre tramo y dirección
@@ -79,8 +77,6 @@ class OverlayService : Service() {
         private const val MAX_TRIP_MIN = 240.0
         private const val MIN_RATE_PER_KM = 100.0
         private const val MAX_RATE_PER_KM = 20000.0
-        private const val MIN_RATE_PER_HOUR = 2000.0
-        private const val MAX_RATE_PER_HOUR = 2000000.0
     }
 
     private lateinit var windowManager: WindowManager
@@ -93,8 +89,6 @@ class OverlayService : Service() {
     private var proxBox: LinearLayout? = null
     private var rateValue: TextView? = null
     private var rateBox: LinearLayout? = null
-    private var timeValue: TextView? = null
-    private var timeBox: LinearLayout? = null
     private var stopsValue: TextView? = null
     private var stopsBox: LinearLayout? = null
     private var inicioTitle: TextView? = null
@@ -162,7 +156,6 @@ class OverlayService : Service() {
         )
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        migrateTimePrefs()
         if (intent?.action == ACTION_STOP) {
             stopSelf()
             return START_NOT_STICKY
@@ -189,7 +182,6 @@ class OverlayService : Service() {
             (360f * density).toInt(),
             resources.displayMetrics.widthPixels - (32f * density).toInt()
         )
-        val accent = Color.rgb(157, 183, 255)
         val labelColor = Color.rgb(145, 155, 178)
         val neutralColor = Color.rgb(139, 149, 168)
         val pillColor = Color.argb(22, 255, 255, 255)
@@ -249,67 +241,59 @@ class OverlayService : Service() {
             return LinearLayoutDetail(col, tv)
         }
 
-        fun directionColumn(label: String): DirectionView {
+        fun directionBlock(label: String): DirectionView {
             val col = LinearLayout(this@OverlayService).apply {
                 orientation = LinearLayout.VERTICAL
                 background = rounded(pillColor, 12f)
                 setPadding(
-                    (10f * density).toInt(), (8f * density).toInt(),
-                    (10f * density).toInt(), (8f * density).toInt()
+                    (12f * density).toInt(), (8f * density).toInt(),
+                    (12f * density).toInt(), (8f * density).toInt()
                 )
             }
             val tl = TextView(this@OverlayService).apply {
                 text = label
-                textSize = 10f
-                setTextColor(accent)
+                textSize = 12f
+                setTextColor(Color.WHITE)
                 gravity = Gravity.START
-                setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
-                letterSpacing = 0.06f
+                setTypeface(android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.NORMAL))
+                letterSpacing = 0.05f
                 maxLines = 1
                 ellipsize = TextUtils.TruncateAt.END
             }
             col.addView(tl)
             val tv = TextView(this@OverlayService).apply {
                 text = "—"
-                textSize = 14f
+                textSize = 19f
                 setTextColor(Color.WHITE)
                 gravity = Gravity.START
-                setTypeface(android.graphics.Typeface.DEFAULT_BOLD)
+                setTypeface(android.graphics.Typeface.create("sans-serif-black", android.graphics.Typeface.NORMAL))
                 maxLines = 2
                 ellipsize = TextUtils.TruncateAt.END
+                setLineSpacing(0f, 0.95f)
             }
             col.addView(tv)
             return DirectionView(col, tl, tv)
         }
 
-        val inicioD = directionColumn("Inicio")
+        // Inicio arriba, Destino abajo. Texto grande y siempre blanco.
+        val inicioD = directionBlock("Inicio")
         inicioTitle = inicioD.title
         inicioValue = inicioD.value
-        val destinoD = directionColumn("Destino")
+        val destinoD = directionBlock("Destino")
         destinoTitle = destinoD.title
         destinoValue = destinoD.value
 
-        val arrow = TextView(this).apply {
-            text = "→"
-            textSize = 20f
-            setTextColor(accent)
-            gravity = Gravity.CENTER
-            setPadding((8f * density).toInt(), 0, (8f * density).toInt(), 0)
-        }
-
         val header = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+            orientation = LinearLayout.VERTICAL
         }
         header.addView(inicioD.box, LinearLayout.LayoutParams(
-            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-        ))
-        header.addView(arrow, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ))
         header.addView(destinoD.box, LinearLayout.LayoutParams(
-            0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f
-        ))
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply {
+            topMargin = (6f * density).toInt()
+        })
 
         val divider = android.view.View(this).apply { setBackgroundColor(dividerColor) }
         val dividerLp = LinearLayout.LayoutParams(
@@ -325,9 +309,6 @@ class OverlayService : Service() {
         val rateD = stat("COP/KM")
         rateValue = rateD.t2
         rateBox = rateD.t1
-        val timeD = stat("COP/H")
-        timeValue = timeD.t2
-        timeBox = timeD.t1
         val stopsD = stat("PARADAS")
         stopsValue = stopsD.t2
         stopsBox = stopsD.t1
@@ -339,7 +320,6 @@ class OverlayService : Service() {
         }
         stats.addView(proxD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         stats.addView(rateD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
-        stats.addView(timeD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         stats.addView(stopsD.t1, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         root.addView(header, LinearLayout.LayoutParams(
@@ -620,6 +600,8 @@ class OverlayService : Service() {
             .take(2)
         val kmSum = chosen.sumOf { it.km }
         val minSum = chosen.sumOf { it.min }
+        // COP/km se calcula con el trayecto, no con la distancia de recogida.
+        val tripKm = if (chosen.size >= 2) chosen.maxByOrNull { it.top }?.km else null
         // La recogida es el tramo más alto en pantalla. Con un solo tramo no es
         // posible saber si es la recogida o el viaje: se deja sin proximidad.
         val firstKm = if (chosen.size >= 2) chosen.minByOrNull { it.top }?.km else null
@@ -643,7 +625,7 @@ class OverlayService : Service() {
                 .joinToString(" || ") { "${it.top}:${it.text.take(28)}" }
             Log.d(TAG, "sin dirección recogida (${pickupLeg.top}-${destLeg.top}): $nearby")
         }
-        return Trip(kmSum, minSum, firstKm, routeTop, pickupAddress, destAddress)
+        return Trip(kmSum, tripKm, minSum, firstKm, routeTop, pickupAddress, destAddress)
     }
 
     private fun findAddressBelow(legTop: Int, beforeTop: Int, lines: List<LineInfo>): String? {
@@ -663,6 +645,7 @@ class OverlayService : Service() {
 
     private data class Trip(
         val kmSum: Double,
+        val tripKm: Double?,
         val minSum: Double,
         val firstKm: Double?,
         val routeTop: Int?,
@@ -681,15 +664,8 @@ class OverlayService : Service() {
         else -> Color.rgb(255, 69, 58)
     }
 
-    private fun classify(rate: Double): String {
-        val lo = normalMin()
-        val hi = normalMax()
-        return when {
-            rate > hi -> "BUENO"
-            rate < lo -> "MALO"
-            else -> "REGULAR"
-        }
-    }
+    private fun classify(rate: Double): String =
+        RateCalculator.classify(rate, normalMin(), normalMax())
 
     // Número de paradas/destinos SOLO si hay un número junto a "parada" o "destino".
     private fun extractStops(result: com.google.mlkit.vision.text.Text): Pair<Int, String>? {
@@ -713,36 +689,9 @@ class OverlayService : Service() {
 
     private fun defaultPrefs(): SharedPreferences = getSharedPreferences("bo2_config", 0)
 
-    // Migra umbrales de tiempo legacy (COP/min < 1000) a COP/hora (x60).
-    private fun migrateTimePrefs() {
-        val p = defaultPrefs()
-        val tm = p.getFloat("time_min", TIME_NORMAL_MIN.toFloat())
-        if (tm > 0f && tm < 1000f) {
-            p.edit()
-                .putFloat("time_min", tm * 60f)
-                .putFloat("time_max", p.getFloat("time_max", TIME_NORMAL_MAX.toFloat()) * 60f)
-                .apply()
-            Log.i(TAG, "migrado time_min $tm/min -> ${tm * 60}/h")
-        }
-    }
-
     private fun normalMin(): Double = defaultPrefs().getFloat("rate_min", RATE_NORMAL_MIN.toFloat()).toDouble()
 
     private fun normalMax(): Double = defaultPrefs().getFloat("rate_max", RATE_NORMAL_MAX.toFloat()).toDouble()
-
-    private fun classifyTime(rate: Double): String {
-        val lo = timeMin()
-        val hi = timeMax()
-        return when {
-            rate > hi -> "BUENO"
-            rate < lo -> "MALO"
-            else -> "REGULAR"
-        }
-    }
-
-    private fun timeMin(): Double = defaultPrefs().getFloat("time_min", TIME_NORMAL_MIN.toFloat()).toDouble()
-
-    private fun timeMax(): Double = defaultPrefs().getFloat("time_max", TIME_NORMAL_MAX.toFloat()).toDouble()
 
     // Una oferta real debe tener ruta, valores creíbles y la ruta debajo del precio.
     // Así un saldo o un precio suelto en pantalla no activa los cuadros.
@@ -750,8 +699,10 @@ class OverlayService : Service() {
         if (price !in MIN_FARE..MAX_FARE) return false
         if (trip.kmSum !in MIN_TRIP_KM..MAX_TRIP_KM) return false
         if (trip.minSum !in MIN_TRIP_MIN..MAX_TRIP_MIN) return false
-        if (price / trip.kmSum !in MIN_RATE_PER_KM..MAX_RATE_PER_KM) return false
-        if (price / trip.minSum * 60.0 !in MIN_RATE_PER_HOUR..MAX_RATE_PER_HOUR) return false
+        val tripKm = trip.tripKm ?: return false
+        if (tripKm !in MIN_TRIP_KM..MAX_TRIP_KM) return false
+        val perKm = RateCalculator.perKm(price, tripKm) ?: return false
+        if (perKm !in MIN_RATE_PER_KM..MAX_RATE_PER_KM) return false
         // En las tarjetas de oferta el detalle de la ruta está debajo del precio.
         val priceBottom = priceLine?.boundingBox?.bottom
         val routeTop = trip.routeTop
@@ -794,7 +745,7 @@ class OverlayService : Service() {
         title?.text = if (comuna != null) "$label · C$comuna" else label
         val text = entry?.barrio ?: fallback?.replace("\n", " ")?.trim() ?: "—"
         value?.text = text
-        value?.setTextColor(if (entry != null) Color.WHITE else Color.rgb(139, 149, 168))
+        value?.setTextColor(Color.WHITE)
     }
 
     // Alerta (solo pitido) cuando una tarifa es BUENO.
@@ -947,10 +898,8 @@ class OverlayService : Service() {
             pendingFrames = 1
         }
 
-        val rate = kmSum?.takeIf { it > 0 }?.let { price / it }
-        val timeRate = minSum?.takeIf { it > 0 }?.let { price / it * 60.0 }
+        val rate = trip?.tripKm?.let { RateCalculator.perKm(price, it) }
         val verdict = rate?.let { classify(it) }
-        val timeVerdict = timeRate?.let { classifyTime(it) }
 
         if (pendingFrames >= SHOW_AFTER_FRAMES) {
             val pickupAddress = trip?.pickupAddress
@@ -964,16 +913,14 @@ class OverlayService : Service() {
 
             val prox = firstKm?.let { classifyProximity(it) }
             val rateText = rate?.let { "%.0f".format(it) }
-            val timeText = timeRate?.let { "%.0f".format(it) }
             renderMetric(proxValue, prox, prox?.let { proximityColor(it) })
             renderMetric(rateValue, rateText, verdict?.let { verdictColor(it) })
-            renderMetric(timeValue, timeText, timeVerdict?.let { verdictColor(it) })
 
             if (shownPrice != amountStr) {
                 shownPrice = amountStr
                 Log.i(
                     TAG,
-                    "RESULT price=$price km=$kmSum min=$minSum prox=$prox rate=$rateText($verdict) rateHora=$timeText($timeVerdict) stops=${stopsInfo?.first}"
+                    "RESULT price=$price km=$kmSum tripKm=${trip?.tripKm} min=$minSum prox=$prox rate=$rateText($verdict) stops=${stopsInfo?.first}"
                 )
                 Log.i(
                     TAG,

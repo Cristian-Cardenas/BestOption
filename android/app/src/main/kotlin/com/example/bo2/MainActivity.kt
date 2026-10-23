@@ -13,18 +13,6 @@ class MainActivity : FlutterActivity() {
     private val channelName = "com.example.bo2/overlay"
     private val requestCaptureCode = 8791
 
-    // Migra umbrales de tiempo legacy (COP/min < 1000) a COP/hora (x60).
-    private fun migrateTimePrefs() {
-        val p = getSharedPreferences("bo2_config", MODE_PRIVATE)
-        val tm = p.getFloat("time_min", 27000f)
-        if (tm > 0f && tm < 1000f) {
-            p.edit()
-                .putFloat("time_min", tm * 60f)
-                .putFloat("time_max", p.getFloat("time_max", 39000f) * 60f)
-                .apply()
-        }
-    }
-
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName).setMethodCallHandler { call, result ->
@@ -52,43 +40,34 @@ class MainActivity : FlutterActivity() {
                     result.success(null)
                 }
                 "getConfig" -> {
-                                    val prefs = getSharedPreferences("bo2_config", MODE_PRIVATE)
-                                    migrateTimePrefs()
-                                    result.success(
-                                        mapOf(
-                                            "rateMin" to prefs.getFloat("rate_min", 1100f),
-                                            "rateMax" to prefs.getFloat("rate_max", 1300f),
-                                            "timeMin" to prefs.getFloat("time_min", 27000f),
-                                                                                        "timeMax" to prefs.getFloat("time_max", 39000f),
-                                                                                        "prox" to prefs.getFloat("prox", 2.0f)
-                                        )
-                                    )
-                                }
-                                "saveConfig" -> {
-                                    val min = (call.argument<Double>("rateMin") ?: 1100.0).toFloat()
-                                    val max = (call.argument<Double>("rateMax") ?: 1300.0).toFloat()
-                                    val tmin = (call.argument<Double>("timeMin") ?: 27000.0).toFloat()
-                                                                        val tmax = (call.argument<Double>("timeMax") ?: 39000.0).toFloat()
-                                                                        val prox = (call.argument<Double>("prox") ?: 2.0).toFloat()
-                                                                        getSharedPreferences("bo2_config", MODE_PRIVATE).edit()
-                                                                            .putFloat("rate_min", min)
-                                                                            .putFloat("rate_max", max)
-                                                                            .putFloat("time_min", tmin)
-                                                                            .putFloat("time_max", tmax)
-                                                                            .putFloat("prox", prox)
-                                                                            .apply()
-                                    result.success(null)
-                                }
-                                "resetConfig" -> {
-                                    getSharedPreferences("bo2_config", MODE_PRIVATE).edit()
-                                        .putFloat("rate_min", 1100f)
-                                        .putFloat("rate_max", 1300f)
-                                        .putFloat("time_min", 27000f)
-                                                                                .putFloat("time_max", 39000f)
-                                                                                .putFloat("prox", 2.0f)
-                                                                                .apply()
-                                    result.success(null)
-                                }
+                    val prefs = getSharedPreferences("bo2_config", MODE_PRIVATE)
+                    result.success(
+                        mapOf(
+                            "rateMin" to prefs.getFloat("rate_min", 1300f),
+                            "rateMax" to prefs.getFloat("rate_max", 1500f),
+                            "prox" to prefs.getFloat("prox", 2.0f)
+                        )
+                    )
+                }
+                "saveConfig" -> {
+                    val min = (call.argument<Double>("rateMin") ?: 1300.0).toFloat()
+                    val max = (call.argument<Double>("rateMax") ?: 1500.0).toFloat()
+                    val prox = (call.argument<Double>("prox") ?: 2.0).toFloat()
+                    getSharedPreferences("bo2_config", MODE_PRIVATE).edit()
+                        .putFloat("rate_min", min)
+                        .putFloat("rate_max", max)
+                        .putFloat("prox", prox)
+                        .apply()
+                    result.success(null)
+                }
+                "resetConfig" -> {
+                    getSharedPreferences("bo2_config", MODE_PRIVATE).edit()
+                        .putFloat("rate_min", 1300f)
+                        .putFloat("rate_max", 1500f)
+                        .putFloat("prox", 2.0f)
+                        .apply()
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
